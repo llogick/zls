@@ -50,6 +50,12 @@ pub const BuildFile = struct {
         config: ?std.json.Parsed(BuildConfig) = null,
     } = .{},
 
+    pub fn hasConfig(self: *BuildFile) bool {
+        self.impl.mutex.lock();
+        defer self.impl.mutex.unlock();
+        return if (self.impl.config) |_| true else false;
+    }
+
     pub fn tryLockConfig(self: *BuildFile) ?BuildConfig {
         self.impl.mutex.lock();
         return if (self.impl.config) |cfg| cfg.value else {
@@ -156,6 +162,9 @@ pub const Handle = struct {
 
     /// error messages from comptime_interpreter or astgen_analyser
     analysis_errors: std.ArrayListUnmanaged(ErrorMessage) = .{},
+
+    /// A list of potential build file uris found while iterating dirs
+    potential_build_file_uris: std.ArrayListUnmanaged(Uri) = .{},
 
     /// `DocumentStore.build_files` is guaranteed to contain this uri
     /// uri memory managed by its build_file
@@ -462,6 +471,9 @@ pub const Handle = struct {
         for (self.import_uris.items) |uri| allocator.free(uri);
         self.import_uris.deinit(allocator);
 
+        for (self.potential_build_file_uris.items) |uri| allocator.free(uri);
+        self.potential_build_file_uris.deinit(allocator);
+
         for (self.analysis_errors.items) |err| allocator.free(err.message);
         self.analysis_errors.deinit(allocator);
 
@@ -588,6 +600,32 @@ fn getOrLoadBuildFile(self: *DocumentStore, uri: Uri) ?*BuildFile {
     return gop.value_ptr.*;
 }
 
+pub fn doubleCheckPotentialBuildFileUri(self: *DocumentStore, handle: *Handle) error{OutOfMemory}!?Uri {
+    handle.impl.lock.lock();
+    defer handle.impl.lock.unlock();
+    switch (handle.potential_build_file_uris.items.len) {
+        0 => {},
+        else => |count| blk: {
+            _ = self.getOrLoadBuildFile(handle.potential_build_file_uris.items[0]) orelse break :blk;
+            handle.associated_build_file = handle.potential_build_file_uris.items[0];
+            if (count == 1) break :blk;
+            const ok: bool = ok: for (handle.potential_build_file_uris.items[1..], 1..) |build_file_uri, index| {
+                const build_file = self.getOrLoadBuildFile(build_file_uri) orelse break :ok false;
+                if (!build_file.hasConfig()) break :ok false;
+                if (try self.uriAssociatedWithBuild(build_file, handle.uri)) {
+                    handle.associated_build_file = handle.potential_build_file_uris.items[index];
+                    break :ok true;
+                }
+            } else unreachable;
+            if (!ok) handle.associated_build_file = null;
+        },
+    }
+    if (handle.associated_build_file) |build_file_uri| {
+        log.debug("Using `{s}` as build file for `{s}`", .{ build_file_uri, handle.uri });
+    }
+    return handle.associated_build_file;
+}
+
 /// **Thread safe** takes an exclusive lock
 pub fn openDocument(self: *DocumentStore, uri: Uri, text: []const u8) error{OutOfMemory}!void {
     const tracy_zone = tracy.trace(@src());
@@ -649,7 +687,7 @@ pub fn refreshDocument(self: *DocumentStore, uri: Uri, new_text: [:0]const u8) !
         log.warn("Document modified without being opened: {s}", .{uri});
     }
     try handle.setSource(new_text);
-    handle.import_uris = try self.collectImportUris(handle.*);
+    handle.import_uris = try self.collectImportUris(handle);
     handle.cimports = try collectCIncludes(self.allocator, handle.tree);
 }
 
@@ -1063,7 +1101,7 @@ fn uriInImports(
     };
     gop.key_ptr.* = handle.uri;
 
-    if (handle.associated_build_file) |associated_build_file_uri| {
+    if (handle.associated_build_file orelse try self.doubleCheckPotentialBuildFileUri(handle)) |associated_build_file_uri| {
         return std.mem.eql(u8, associated_build_file_uri, build_file_uri);
     }
 
@@ -1103,22 +1141,14 @@ fn createDocument(self: *DocumentStore, uri: Uri, text: [:0]const u8, open: bool
         while (try build_it.next()) |build_path| {
             defer self.allocator.free(build_path);
 
-            // log.debug("found build path: {s}", .{build_path});
-
             const build_file_uri = try URI.fromPath(self.allocator, build_path);
-            defer self.allocator.free(build_file_uri);
-            const build_file = self.getOrLoadBuildFile(build_file_uri) orelse continue;
-
-            if (handle.associated_build_file == null) {
-                handle.associated_build_file = build_file.uri;
-            } else if (try self.uriAssociatedWithBuild(build_file, uri)) {
-                handle.associated_build_file = build_file.uri;
-                break;
-            }
+            try handle.potential_build_file_uris.append(handle.impl.allocator, build_file_uri);
         }
+
+        _ = try self.doubleCheckPotentialBuildFileUri(&handle); // Trigger association logic and/or build file(s) run(s)
     }
 
-    handle.import_uris = try self.collectImportUris(handle);
+    handle.import_uris = try self.collectImportUris(&handle);
     handle.cimports = try collectCIncludes(self.allocator, handle.tree);
 
     return handle;
@@ -1150,7 +1180,7 @@ fn createAndStoreDocument(self: *DocumentStore, uri: Uri, text: [:0]const u8, op
 
 /// Caller owns returned memory.
 /// **Thread safe** takes a shared lock
-fn collectImportUris(self: *DocumentStore, handle: Handle) error{OutOfMemory}!std.ArrayListUnmanaged(Uri) {
+fn collectImportUris(self: *DocumentStore, handle: *Handle) error{OutOfMemory}!std.ArrayListUnmanaged(Uri) {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
@@ -1386,7 +1416,7 @@ pub fn resolveCImport(self: *DocumentStore, handle: Handle, node: Ast.Node.Index
 /// and returns it's uri
 /// caller owns the returned memory
 /// **Thread safe** takes a shared lock
-pub fn uriFromImportStr(self: *DocumentStore, allocator: std.mem.Allocator, handle: Handle, import_str: []const u8) error{OutOfMemory}!?Uri {
+pub fn uriFromImportStr(self: *DocumentStore, allocator: std.mem.Allocator, handle: *Handle, import_str: []const u8) error{OutOfMemory}!?Uri {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
@@ -1412,7 +1442,7 @@ pub fn uriFromImportStr(self: *DocumentStore, allocator: std.mem.Allocator, hand
         }
         return null;
     } else if (!std.mem.endsWith(u8, import_str, ".zig")) {
-        if (handle.associated_build_file) |build_file_uri| blk: {
+        if (handle.associated_build_file orelse try self.doubleCheckPotentialBuildFileUri(handle)) |build_file_uri| blk: {
             const build_file = self.getBuildFile(build_file_uri).?;
             const build_config = build_file.tryLockConfig() orelse break :blk;
             defer build_file.unlockConfig();

@@ -203,7 +203,7 @@ fn gotoDefinitionString(
     const uri = switch (pos_context) {
         .import_string_literal,
         .embedfile_string_literal,
-        => try document_store.uriFromImportStr(arena, handle.*, import_str),
+        => try document_store.uriFromImportStr(arena, handle, import_str),
         .cinclude_string_literal => try URI.fromPath(
             arena,
             blk: {

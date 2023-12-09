@@ -1459,11 +1459,11 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
                 const import_str = tree.tokenSlice(main_tokens[import_param]);
                 const import_uri = (try analyser.store.uriFromImportStr(
                     analyser.arena.allocator(),
-                    handle.*,
+                    handle,
                     import_str[1 .. import_str.len - 1],
                 )) orelse (try analyser.store.uriFromImportStr(
                     analyser.arena.allocator(),
-                    if (analyser.root_handle) |root_handle| root_handle.* else return null,
+                    if (analyser.root_handle) |root_handle| root_handle else return null,
                     import_str[1 .. import_str.len - 1],
                 )) orelse return null;
 
@@ -2422,7 +2422,7 @@ pub fn getFieldAccessType(
                         .start = import_str_tok.loc.start + 1,
                         .end = import_str_tok.loc.end - 1,
                     });
-                    const uri = try analyser.store.uriFromImportStr(analyser.arena.allocator(), curr_handle.*, import_str) orelse return null;
+                    const uri = try analyser.store.uriFromImportStr(analyser.arena.allocator(), curr_handle, import_str) orelse return null;
                     const node_handle = analyser.store.getOrLoadHandle(uri) orelse return null;
                     current_type = TypeWithHandle.typeVal(NodeWithHandle{ .handle = node_handle, .node = 0 });
                     _ = tokenizer.next(); // eat the .r_paren
