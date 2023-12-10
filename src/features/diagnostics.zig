@@ -40,6 +40,88 @@ pub fn generateDiagnostics(server: *Server, arena: std.mem.Allocator, handle: *D
         });
     }
 
+    {
+        handle.impl.lock.lock();
+        defer handle.impl.lock.unlock();
+        if (handle.failed_mod_import_token_index) |tok_idx| {
+            if (handle.associated_build_file) |uri| {
+                if (server.document_store.getBuildFile(uri)) |build_file| {
+                    build_file.impl.mutex.lock();
+                    defer build_file.impl.mutex.unlock();
+                    if (build_file.build_run_err) |err| {
+                        try diagnostics.append(arena, .{
+                            .range = offsets.tokenToRange(tree, tok_idx, server.offset_encoding),
+                            .severity = .Error,
+                            .code = .{ .string = "imports" },
+                            .source = "zls",
+                            .message = try std.fmt.allocPrint(arena, "Run failed: {s}.", .{err}),
+                        });
+                    } else if (build_file.hasConfig()) {
+                        try diagnostics.append(arena, .{
+                            .range = offsets.tokenToRange(tree, tok_idx, server.offset_encoding),
+                            .severity = .Error,
+                            .code = .{ .string = "imports" },
+                            .source = "zls",
+                            .message = try std.fmt.allocPrint(arena, "Module not found in {s}.", .{build_file.uri}),
+                        });
+                    } else {
+                        try diagnostics.append(arena, .{
+                            .range = offsets.tokenToRange(tree, tok_idx, server.offset_encoding),
+                            .severity = .Warning,
+                            .code = .{ .string = "imports" },
+                            .source = "zls",
+                            .message = try std.fmt.allocPrint(arena, "Pending a `{s}` run.", .{build_file.uri}),
+                        });
+                    }
+                } else {
+                    try diagnostics.append(arena, .{
+                        .range = offsets.tokenToRange(tree, tok_idx, server.offset_encoding),
+                        .severity = .Error,
+                        .code = .{ .string = "imports" },
+                        .source = "zls",
+                        .message = "Could not get the build file associated with this document.",
+                    });
+                }
+            } else {
+                try diagnostics.append(arena, .{
+                    .range = offsets.tokenToRange(tree, tok_idx, server.offset_encoding),
+                    .severity = .Warning,
+                    .code = .{ .string = "imports" },
+                    .source = "zls",
+                    .message = "No associated build file for the current document (yet).",
+                });
+                for (handle.potential_build_file_uris.items) |uri| {
+                    const build_file = server.document_store.getBuildFile(uri) orelse continue;
+                    build_file.impl.mutex.lock();
+                    defer build_file.impl.mutex.unlock();
+                    if (build_file.build_run_err) |err| {
+                        try diagnostics.append(arena, .{
+                            .range = offsets.tokenToRange(tree, 0, server.offset_encoding),
+                            .severity = .Error,
+                            .code = .{ .string = "imports" },
+                            .source = "zls",
+                            .message = try std.fmt.allocPrint(arena, "Run failed for a potential build file for this document: {s}.", .{err}),
+                        });
+                    }
+                }
+            }
+        } else if (handle.associated_build_file) |uri| {
+            if (server.document_store.getBuildFile(uri)) |build_file| {
+                build_file.impl.mutex.lock();
+                defer build_file.impl.mutex.unlock();
+                if (build_file.build_run_err) |err| {
+                    try diagnostics.append(arena, .{
+                        .range = offsets.tokenToRange(tree, 0, server.offset_encoding),
+                        .severity = .Error,
+                        .code = .{ .string = "imports" },
+                        .source = "zls",
+                        .message = try std.fmt.allocPrint(arena, "Run failed: {s}.", .{err}),
+                    });
+                }
+            }
+        }
+    }
+
     if (server.config.enable_ast_check_diagnostics and tree.errors.len == 0) {
         try getAstCheckDiagnostics(server, arena, handle, &diagnostics);
     }

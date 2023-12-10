@@ -41,6 +41,10 @@ pub const BuildFile = struct {
     builtin_uri: ?Uri = null,
     /// config options extracted from zls.build.json
     build_associated_config: ?std.json.Parsed(BuildAssociatedConfig) = null,
+
+    /// Set to the contents of StdErr if the run fails
+    build_run_err: ?[]const u8 = null,
+
     impl: struct {
         mutex: std.Thread.Mutex = .{},
         /// contains information extracted from running build.zig with a custom build runner
@@ -149,6 +153,7 @@ pub const BuildFile = struct {
         if (self.impl.config) |cfg| cfg.deinit();
         if (self.builtin_uri) |builtin_uri| allocator.free(builtin_uri);
         if (self.build_associated_config) |cfg| cfg.deinit();
+        if (self.build_run_err) |err| allocator.free(err);
     }
 };
 
@@ -169,6 +174,10 @@ pub const Handle = struct {
     /// `DocumentStore.build_files` is guaranteed to contain this uri
     /// uri memory managed by its build_file
     associated_build_file: ?Uri = null,
+
+    /// Approximate token index of the last unresolved `@import("module")` after
+    /// a call to `uriFromImportStr` (see: generateDiagnostics)
+    failed_mod_import_token_index: ?Ast.TokenIndex = null,
 
     /// private field
     impl: struct {
@@ -369,6 +378,12 @@ pub const Handle = struct {
         return @bitCast(self.impl.status.load(.Acquire));
     }
 
+    pub fn setLastFailedImportTokenIndex(self: *Handle, token_index: ?Ast.TokenIndex) void {
+        self.impl.lock.lock();
+        defer self.impl.lock.unlock();
+        self.failed_mod_import_token_index = token_index;
+    }
+
     /// returns the previous value
     fn setOpen(self: *Handle, open: bool) bool {
         if (open) {
@@ -496,6 +511,7 @@ runtime_zig_version: *const ?ZigVersionWrapper,
 lock: std.Thread.RwLock = .{},
 handles: std.StringArrayHashMapUnmanaged(*Handle) = .{},
 build_files: std.StringArrayHashMapUnmanaged(*BuildFile) = .{},
+build_files_lock: std.Thread.RwLock = .{},
 cimports: std.AutoArrayHashMapUnmanaged(Hash, translate_c.Result) = .{},
 
 pub fn deinit(self: *DocumentStore) void {
@@ -567,8 +583,8 @@ pub fn getOrLoadHandle(self: *DocumentStore, uri: Uri) ?*Handle {
 
 /// **Thread safe** takes a shared lock
 pub fn getBuildFile(self: *DocumentStore, uri: Uri) ?*BuildFile {
-    self.lock.lockShared();
-    defer self.lock.unlockShared();
+    self.build_files_lock.lockShared();
+    defer self.build_files_lock.unlockShared();
     return self.build_files.get(uri);
 }
 
@@ -577,8 +593,8 @@ pub fn getBuildFile(self: *DocumentStore, uri: Uri) ?*BuildFile {
 fn getOrLoadBuildFile(self: *DocumentStore, uri: Uri) ?*BuildFile {
     if (self.getBuildFile(uri)) |build_file| return build_file;
 
-    self.lock.lock();
-    defer self.lock.unlock();
+    self.build_files_lock.lock();
+    defer self.build_files_lock.unlock();
 
     const gop = self.build_files.getOrPut(self.allocator, uri) catch return null;
     if (!gop.found_existing) {
@@ -710,6 +726,7 @@ pub fn invalidateBuildFile(self: *DocumentStore, build_file_uri: Uri) error{OutO
         build_config.deinit();
         return;
     };
+
     build_file.setBuildConfig(build_config);
 }
 
@@ -926,11 +943,17 @@ pub fn loadBuildConfiguration(self: *DocumentStore, build_file_uri: Uri) !std.js
         });
     };
     defer self.allocator.free(zig_run_result.stdout);
-    defer self.allocator.free(zig_run_result.stderr);
+    // defer self.allocator.free(zig_run_result.stderr);
 
     errdefer blk: {
         const joined = std.mem.join(self.allocator, " ", args) catch break :blk;
         defer self.allocator.free(joined);
+
+        const build_file = self.getBuildFile(build_file_uri) orelse break :blk;
+        build_file.impl.mutex.lock();
+        if (build_file.build_run_err) |err| self.allocator.free(err);
+        build_file.build_run_err = zig_run_result.stderr;
+        build_file.impl.mutex.unlock();
 
         log.err(
             "Failed to execute build runner to collect build configuration, command:\n{s}\nError: {s}",
@@ -941,6 +964,14 @@ pub fn loadBuildConfiguration(self: *DocumentStore, build_file_uri: Uri) !std.js
     switch (zig_run_result.term) {
         .Exited => |exit_code| if (exit_code != 0) return error.RunFailed,
         else => return error.RunFailed,
+    }
+
+    blk: {
+        const build_file = self.getBuildFile(build_file_uri) orelse break :blk;
+        build_file.impl.mutex.lock();
+        if (build_file.build_run_err) |err| self.allocator.free(err);
+        build_file.build_run_err = null;
+        build_file.impl.mutex.unlock();
     }
 
     const parse_options = std.json.ParseOptions{
@@ -1195,7 +1226,7 @@ fn collectImportUris(self: *DocumentStore, handle: *Handle) error{OutOfMemory}!s
 
     // Convert to URIs
     while (i < imports.items.len) {
-        const maybe_uri = try self.uriFromImportStr(self.allocator, handle, imports.items[i]);
+        const maybe_uri = try self.uriFromImportStr(self.allocator, handle, imports.items[i], 0); // TODO Pass an actual TokenIndex
 
         if (maybe_uri) |uri| {
             // The raw import strings are owned by the document and do not need to be freed here.
@@ -1416,7 +1447,13 @@ pub fn resolveCImport(self: *DocumentStore, handle: Handle, node: Ast.Node.Index
 /// and returns it's uri
 /// caller owns the returned memory
 /// **Thread safe** takes a shared lock
-pub fn uriFromImportStr(self: *DocumentStore, allocator: std.mem.Allocator, handle: *Handle, import_str: []const u8) error{OutOfMemory}!?Uri {
+pub fn uriFromImportStr(
+    self: *DocumentStore,
+    allocator: std.mem.Allocator,
+    handle: *Handle,
+    import_str: []const u8,
+    import_str_token_index: Ast.TokenIndex,
+) error{OutOfMemory}!?Uri {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
@@ -1442,6 +1479,7 @@ pub fn uriFromImportStr(self: *DocumentStore, allocator: std.mem.Allocator, hand
         }
         return null;
     } else if (!std.mem.endsWith(u8, import_str, ".zig")) {
+        handle.setLastFailedImportTokenIndex(null);
         if (handle.associated_build_file orelse try self.doubleCheckPotentialBuildFileUri(handle)) |build_file_uri| blk: {
             const build_file = self.getBuildFile(build_file_uri).?;
             const build_config = build_file.tryLockConfig() orelse break :blk;
@@ -1463,6 +1501,7 @@ pub fn uriFromImportStr(self: *DocumentStore, allocator: std.mem.Allocator, hand
                 }
             }
         }
+        handle.setLastFailedImportTokenIndex(import_str_token_index);
         return null;
     } else {
         var separator_index = handle.uri.len;
