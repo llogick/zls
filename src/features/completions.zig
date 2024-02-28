@@ -709,7 +709,13 @@ fn kindToSortScore(kind: types.CompletionItemKind) ?[]const u8 {
     };
 }
 
-fn completeDot(document_store: *DocumentStore, analyser: *Analyser, arena: std.mem.Allocator, handle: *DocumentStore.Handle, loc: offsets.Loc) error{OutOfMemory}![]types.CompletionItem {
+fn completeDot(
+    server: *Server,
+    analyser: *Analyser,
+    arena: std.mem.Allocator,
+    handle: *DocumentStore.Handle,
+    loc: offsets.Loc,
+) error{OutOfMemory}![]types.CompletionItem {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
@@ -720,6 +726,7 @@ fn completeDot(document_store: *DocumentStore, analyser: *Analyser, arena: std.m
     if (dot_token_index < 2) return &.{};
 
     var completions = std.ArrayListUnmanaged(types.CompletionItem){};
+    const use_snippets = server.config.enable_snippets and server.client_capabilities.supports_snippets;
 
     blk: {
         const dot_context = getEnumLiteralContext(tree, dot_token_index) orelse break :blk;
@@ -734,7 +741,7 @@ fn completeDot(document_store: *DocumentStore, analyser: *Analyser, arena: std.m
             if (dot_context.likely == .enum_arg and !container.isEnumType()) continue;
             if (dot_context.likely != .struct_field)
                 if (!container.isEnumType() and !container.isUnionType()) continue;
-            try collectContainerFields(arena, container, &completions);
+            try collectContainerFields(arena, use_snippets, dot_context.likely, container, &completions);
         }
     }
 
@@ -746,7 +753,7 @@ fn completeDot(document_store: *DocumentStore, analyser: *Analyser, arena: std.m
     if (token_tags[dot_token_index - 1] == .number_literal or token_tags[dot_token_index - 1] != .equal) return &.{};
 
     // `var enum_val = .` or the get*Context logic failed because of syntax errors (parser didn't create the necessary node(s))
-    const enum_completions = try globalSetCompletions(document_store, arena, handle, .enum_set);
+    const enum_completions = try globalSetCompletions(&server.document_store, arena, handle, .enum_set);
     return enum_completions;
 }
 
@@ -900,7 +907,7 @@ pub fn completionAtIndex(server: *Server, analyser: *Analyser, arena: std.mem.Al
         .var_access, .empty => try completeGlobal(server, analyser, arena, handle, source_index),
         .field_access => |loc| try completeFieldAccess(server, analyser, arena, handle, source_index, loc),
         .global_error_set => try completeError(server, arena, handle),
-        .enum_literal => |loc| try completeDot(&server.document_store, analyser, arena, handle, loc),
+        .enum_literal => |loc| try completeDot(server, analyser, arena, handle, loc),
         .label => try completeLabel(server, analyser, arena, handle, source_index),
         .import_string_literal,
         .cinclude_string_literal,
@@ -1266,6 +1273,8 @@ fn getSwitchOrStructInitContext(
 /// Given a Type that is a container, adds it's `.container_field*`s to completions
 pub fn collectContainerFields(
     arena: std.mem.Allocator,
+    snippets_ok: bool,
+    likely: EnumLiteralContext.Likely,
     container: Analyser.Type,
     completions: *std.ArrayListUnmanaged(types.CompletionItem),
 ) error{OutOfMemory}!void {
@@ -1280,7 +1289,15 @@ pub fn collectContainerFields(
     for (container_decl.ast.members) |member| {
         const field = handle.tree.fullContainerField(member) orelse continue;
         const name = handle.tree.tokenSlice(field.ast.main_token);
-        try completions.append(arena, .{
+        if (likely == .enum_assignment and !field.ast.tuple_like and container.isUnionType()) {
+            try completions.append(arena, .{
+                .label = name,
+                .kind = if (field.ast.tuple_like) .EnumMember else .Field,
+                .detail = Analyser.getContainerFieldSignature(handle.tree, field),
+                .insertText = if (snippets_ok) try std.fmt.allocPrint(arena, "{{ .{s} = $1 }}$0", .{name}) else try std.fmt.allocPrint(arena, "{{ .{s} = ", .{name}),
+                .insertTextFormat = if (snippets_ok) .Snippet else .PlainText,
+            });
+        } else try completions.append(arena, .{
             .label = name,
             .kind = if (field.ast.tuple_like) .EnumMember else .Field,
             .detail = Analyser.getContainerFieldSignature(handle.tree, field),

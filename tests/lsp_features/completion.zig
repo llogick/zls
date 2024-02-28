@@ -19,6 +19,7 @@ const Completion = struct {
     documentation: ?[]const u8 = null,
     insert_text: ?[]const u8 = null,
     deprecated: bool = false,
+    insert_text_format: ?types.InsertTextFormat = null,
 };
 
 const CompletionSet = std.StringArrayHashMapUnmanaged(Completion);
@@ -1308,6 +1309,45 @@ test "global enum set" {
     });
 }
 
+test "union(enum)" {
+    try testCompletion(
+        \\const Birdie = enum {
+        \\    canary,
+        \\};
+        \\const Ue = union(enum) {
+        \\    alpha,
+        \\    beta: []const u8,
+        \\};
+        \\const S = struct{ foo: Ue };
+        \\test {
+        \\    const s = S{};
+        \\    s.foo = .<cursor>
+        \\}
+    , &.{
+        .{ .label = "alpha", .kind = .EnumMember, .insert_text_format = .PlainText, .insert_text = "alpha" },
+        .{ .label = "beta", .kind = .Field, .insert_text_format = .Snippet, .insert_text = "{ .beta = $1 }$0" },
+    });
+    try testCompletionWithOptions(
+        \\const Birdie = enum {
+        \\    canary,
+        \\};
+        \\const Ue = union(enum) {
+        \\    alpha,
+        \\    beta: []const u8,
+        \\};
+        \\const S = struct{ foo: Ue };
+        \\test {
+        \\    const s = S{};
+        \\    s.foo = .<cursor>
+        \\}
+    , &.{
+        .{ .label = "alpha", .kind = .EnumMember, .insert_text_format = .PlainText, .insert_text = "alpha" },
+        .{ .label = "beta", .kind = .Field, .insert_text_format = .PlainText, .insert_text = "{ .beta = " },
+    }, .{
+        .enable_snippets = false,
+    });
+}
+
 test "switch cases" {
     // Because current logic is to list all enums if all else fails,
     // the following tests include an extra enum to ensure that we're not just 'getting lucky'
@@ -2331,7 +2371,7 @@ test "snippet - function with `self` parameter" {
         \\const s = S{};
         \\s.<cursor>
     , &.{
-        .{ .label = "f", .kind = .Method, .detail = "fn (self: S) void", .insert_text = "f()" },
+        .{ .label = "f", .kind = .Method, .detail = "fn (self: S) void", .insert_text_format = .Snippet, .insert_text = "f()" },
     }, .{
         .enable_argument_placeholders = false,
     });
@@ -2341,7 +2381,7 @@ test "snippet - function with `self` parameter" {
         \\};
         \\S.<cursor>
     , &.{
-        .{ .label = "f", .kind = .Function, .detail = "fn (self: S) void", .insert_text = "f(${1:self: S})" },
+        .{ .label = "f", .kind = .Function, .detail = "fn (self: S) void", .insert_text_format = .Snippet, .insert_text = "f(${1:self: S})" },
     });
     try testCompletionWithOptions(
         \\const S = struct {
@@ -2349,7 +2389,7 @@ test "snippet - function with `self` parameter" {
         \\};
         \\S.<cursor>
     , &.{
-        .{ .label = "f", .kind = .Function, .detail = "fn (self: S) void", .insert_text = "f(${1:})" },
+        .{ .label = "f", .kind = .Function, .detail = "fn (self: S) void", .insert_text_format = .Snippet, .insert_text = "f(${1:})" },
     }, .{
         .enable_argument_placeholders = false,
     });
@@ -2373,7 +2413,7 @@ test "snippets disabled" {
         \\};
         \\S.<cursor>
     , &.{
-        .{ .label = "f", .kind = .Function, .detail = "fn (self: S) void", .insert_text = "f" },
+        .{ .label = "f", .kind = .Function, .detail = "fn (self: S) void", .insert_text_format = .PlainText, .insert_text = "f" },
     }, .{
         .enable_snippets = false,
     });
@@ -2537,10 +2577,8 @@ fn testCompletionWithOptions(source: []const u8, expected_completions: []const C
         }
 
         if (expected_completion.insert_text) |expected_insert| blk: {
-            try std.testing.expectEqual(
-                @as(?types.InsertTextFormat, if (options.enable_snippets) .Snippet else .PlainText),
-                actual_completion.insertTextFormat,
-            );
+            if (expected_completion.insert_text_format) |_|
+                try std.testing.expectEqual(actual_completion.insertTextFormat, expected_completion.insert_text_format);
             const actual_insert = actual_completion.insertText;
             if (actual_insert != null and std.mem.eql(u8, expected_insert, actual_insert.?)) break :blk;
             try error_builder.msgAtIndex("completion item '{s}' should have insert text '{s}' but was '{?s}'!", test_uri, cursor_idx, .err, .{
