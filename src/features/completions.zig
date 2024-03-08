@@ -694,15 +694,75 @@ fn kindToSortScore(kind: types.CompletionItemKind) ?[]const u8 {
     };
 }
 
-fn completeDot(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!void {
+const DotContext = struct {
+    const Tag = enum {
+        /// A `.` within braces, eg `x{.`, `var s: S = .{.`, `f(.{.` or `a.f(.{.`
+        field_init,
+        /// eg `[_]S{.`
+        array_elem_init,
+        /// The previous entries in the stack depend on looking up a fn arg
+        fn_arg,
+        /// eg `f(){.`
+        fn_ret,
+        /// `switch(..) {.`
+        switch_case,
+        /// eg `var e: Enum = .`, `abc.field = .`, `f(.{.field = .`
+        /// `f() = .` or `identifier.f() = .` are ignored, ie lhs of `=` is a fn call
+        assignment,
+        /// `== .`, `!= .`
+        comparison,
+    };
+    /// The last token index of the expr to eval, ie pass to collectContainerNodes
+    expr_token_index: Ast.TokenIndex,
+    /// Either a field index or a fn arg index
+    meta_index: u32 = 0,
+    tag: Tag,
+};
+
+const Stack = std.ArrayList(DotContext);
+
+fn peek(stack: *Stack) *DotContext {
+    if (stack.items.len == 0) unreachable;
+    return &stack.items[stack.items.len - 1];
+}
+
+fn completeDot(builder: *Builder, enum_literal_loc: offsets.Loc) error{OutOfMemory}!void {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
     const tree = builder.orig_handle.tree;
     const token_tags = tree.tokens.items(.tag);
 
-    const dot_token_index = offsets.sourceIndexToTokenIndex(tree, loc.start);
+    const dot_token_index = offsets.sourceIndexToTokenIndex(tree, enum_literal_loc.start);
     if (dot_token_index < 2) return;
+
+    blk: {
+        var stack = try Stack.initCapacity(builder.arena, 4);
+        defer stack.deinit();
+        getEnumLiteralContext2(&stack, tree, dot_token_index) catch break :blk;
+        // for (stack.items) |item| {
+        // std.log.debug("dot_ctx_item: {}", .{item});
+        // std.log.debug("int: {}", .{@intFromEnum(item)});
+        // }
+        var current_type: ?Analyser.Type = null;
+        while (stack.popOrNull()) |dot_context| {
+            const position_context = try Analyser.getPositionContext(
+                builder.arena,
+                tree.source,
+                offsets.tokenToLoc(tree, dot_context.expr_token_index).end,
+                false,
+            );
+            current_type = switch (position_context) {
+                .var_access => |loc| try getVarAccessContainerNode(builder, loc, dot_context),
+                .field_access => |loc| try getFieldAccessContainerNode(builder, loc, dot_context),
+                .enum_literal => |loc| try getEnumLiteralContainerNode(builder, loc, dot_context, current_type),
+                .builtin => |loc| try getBuiltinContainerNode(builder, loc, dot_context),
+                .keyword => |tag| try getKeywordFnContainerNode(builder, tag, dot_context),
+                else => break :blk,
+            };
+            std.log.debug("dctx: {}\npctx: {}\ntype: {?}", .{ dot_context, position_context, current_type });
+        }
+    }
 
     blk: {
         const dot_context = getEnumLiteralContext(tree, dot_token_index) orelse break :blk;
@@ -1624,4 +1684,428 @@ fn collectKeywordFnContainerNodes(
     };
     const ty = try builder.analyser.instanceStdBuiltinType(builtin_type_name) orelse return;
     try types_with_handles.append(builder.arena, ty);
+}
+
+// ---------- WIP -------------
+fn getEnumLiteralContext2(stack: *Stack, tree: Ast, dot_token_index: Ast.TokenIndex) !void {
+    const token_tags = tree.tokens.items(.tag);
+
+    // Allow using `1.` (parser workaround)
+    var token_index = if (token_tags[dot_token_index - 1] == .number_literal)
+        (dot_token_index - 2)
+    else
+        (dot_token_index - 1);
+
+    std.debug.assert(stack.items.len == 0);
+
+    switch (token_tags[token_index]) {
+        .equal => {
+            token_index -= 1;
+            if ((token_tags[token_index] == .r_paren)) return error.CannotAssignToFnResult; // `..) = .`, ie lhs is a fn call
+            try stack.append(DotContext{
+                .tag = .assignment,
+                .expr_token_index = token_index,
+            });
+        },
+        .equal_equal, .bang_equal => {
+            token_index -= 1;
+            try stack.append(DotContext{
+                .tag = .comparison,
+                .expr_token_index = token_index,
+            });
+        },
+        .l_brace, .comma, .l_paren => {
+            try getSwitchOrStructInitContext2(stack, tree, dot_token_index);
+        },
+        else => return error.UnknownContext,
+    }
+}
+
+/// Looks for an identifier that can be passed to `collectContainerNodes()`
+/// Returns the token index of the identifer
+/// If the identifier is a `fn_name`, `fn_arg_index` is the index of the fn's param
+fn getSwitchOrStructInitContext2(stack: *Stack, tree: Ast, dot_token_index: Ast.TokenIndex) !void {
+    // at least 3 tokens should be present, `x{.`
+    if (dot_token_index < 2) return error.NotEnoughTokens;
+    const token_tags = tree.tokens.items(.tag);
+    // pedantic check (can be removed if the "generic exit" conditions below are made to cover more/all cases)
+    if (token_tags[dot_token_index] != .period) return error.InvalidToken;
+    var upper_index = dot_token_index - 1;
+    // This prevents completions popping up for `x{.field.`
+    if (token_tags[upper_index] == .identifier) return error.InvalidToken;
+    // This prevents completions popping up for `x{.field = .`, ie it would suggest `field` again
+    // in this case `fn completeDot` would still provide enum completions
+    if (token_tags[upper_index] == .equal) return error.InvalidToken;
+
+    // The following logic is weird because we assume at least one .l_brace and/or .l_paren
+    // => a couple of helpful constants:
+    const even = 1; // we haven't found an opening brace or paren so the count is even
+    const one_opening = 0; // an unmatched opening brace or paren makes the depth 0
+
+    var braces_depth: i32 = even;
+    var parens_depth: i32 = even;
+    var meta_index: u32 = 0;
+
+    std.debug.assert(stack.items.len == 0);
+
+    // look for .identifier followed by .l_brace, skipping matches at braces_depth 'even'+
+    while (upper_index > 0) : (upper_index -= 1) {
+        switch (token_tags[upper_index]) {
+            .r_brace => braces_depth += 1,
+            .l_brace => {
+                braces_depth -= 1;
+                if (braces_depth != one_opening) continue;
+                upper_index -= 1;
+                switch (token_tags[upper_index]) {
+                    // `S{.`
+                    .identifier => {
+                        const identifier_token_index = upper_index;
+                        while (upper_index > 0 and switch (token_tags[upper_index]) {
+                            .period, .identifier => true,
+                            else => false,
+                        }) : (upper_index -= 1) {}
+                        std.log.debug("ttag: {}", .{token_tags[upper_index]});
+                        const item: DotContext = if (token_tags[upper_index] == .r_bracket)
+                            .{
+                                .tag = .array_elem_init,
+                                .expr_token_index = identifier_token_index,
+                                .meta_index = meta_index,
+                            }
+                        else
+                            .{
+                                .tag = .field_init,
+                                .expr_token_index = identifier_token_index,
+                                .meta_index = meta_index,
+                            };
+                        try stack.append(item);
+                        return;
+                    },
+                    // `.{.`
+                    .period => {
+                        if (upper_index < 3) return error.NotEnoughTokens;
+                        const p_token_index = upper_index;
+                        upper_index -= 1;
+                        if (token_tags[upper_index] == .ampersand) upper_index -= 1; // `&.{.`
+                        switch (token_tags[upper_index]) {
+                            // `= .{.`
+                            .equal => {
+                                upper_index -= 1; // eat the `=`
+                                switch (token_tags[upper_index]) {
+                                    // `const s: S = .{.`
+                                    .identifier => {
+                                        const identifier_token_index = upper_index;
+                                        while (upper_index > 0 and switch (token_tags[upper_index]) {
+                                            .period, .identifier => true,
+                                            else => false,
+                                        }) : (upper_index -= 1) {}
+                                        std.log.debug("ttag: {}", .{token_tags[upper_index]});
+                                        const item: DotContext = if (token_tags[upper_index] == .r_bracket)
+                                            .{
+                                                .tag = .array_elem_init,
+                                                .expr_token_index = identifier_token_index,
+                                                .meta_index = meta_index,
+                                            }
+                                        else
+                                            .{
+                                                .tag = .field_init,
+                                                .expr_token_index = identifier_token_index,
+                                                .meta_index = meta_index,
+                                            };
+                                        try stack.append(item);
+                                        return;
+                                    },
+                                    .period_asterisk, //  `s.* = .{.`
+                                    => {
+                                        // XXX `[_]S = .{.` ?
+                                        try stack.append(DotContext{
+                                            .tag = .field_init,
+                                            .expr_token_index = upper_index,
+                                            .meta_index = meta_index,
+                                        });
+                                        return;
+                                    },
+                                    else => return error.UnexpectedToken,
+                                }
+                            },
+                            .comma,
+                            .l_brace,
+                            .l_paren,
+                            => {
+                                if (token_tags[upper_index] == .l_brace and switch (token_tags[upper_index - 1]) {
+                                    .period,
+                                    .identifier,
+                                    => false,
+                                    else => true,
+                                }) return error.UnexpectedToken;
+                                upper_index += 1; // !!
+                                try stack.append(DotContext{
+                                    .tag = .field_init,
+                                    .expr_token_index = p_token_index,
+                                    .meta_index = meta_index,
+                                });
+                                meta_index = 0;
+                                braces_depth = even;
+                            },
+                            else => return error.UnexpectedToken,
+                        }
+                    },
+                    else => return error.UnexpectedToken,
+                }
+            },
+            .r_paren => {
+                parens_depth += 1;
+                // XXX? parens_depth < one_opening and
+                if (braces_depth == one_opening and token_tags[upper_index + 1] == .l_brace) {
+                    var token_index = upper_index - 1; // if `switch` we need the last token of the condition
+                    parens_depth = even;
+                    // Walk backwards counting parens until one_opening then check the preceding token's tag
+                    while (token_index > 0) : (token_index -= 1) {
+                        switch (token_tags[token_index]) {
+                            .r_paren => parens_depth += 1,
+                            .l_paren => {
+                                parens_depth -= 1;
+                                if (parens_depth == one_opening)
+                                    switch (token_tags[token_index - 1]) {
+                                        .keyword_switch => {
+                                            upper_index -= 1; // eat the switch's .r_paren
+                                            try stack.append(DotContext{
+                                                .tag = .switch_case,
+                                                .expr_token_index = upper_index,
+                                            });
+                                            return;
+                                        },
+                                        .identifier,
+                                        // .builtin, // `@f(){.`
+                                        => {
+                                            upper_index = token_index - 1; // the fn name
+                                            try stack.append(DotContext{
+                                                .tag = .fn_ret,
+                                                .expr_token_index = upper_index,
+                                            });
+                                            return;
+                                        },
+                                        else => return error.UnexpectedToken,
+                                    };
+                            },
+                            .semicolon => return error.NotFound,
+                            else => {},
+                        }
+                    }
+                }
+            },
+            .l_paren => {
+                parens_depth -= 1;
+                if (parens_depth != one_opening) continue;
+                if (braces_depth != even) return error.BracesMismatch;
+                upper_index -= 1;
+                switch (token_tags[upper_index]) {
+                    // `f(.`
+                    .identifier,
+                    .builtin,
+                    .keyword_addrspace,
+                    .keyword_callconv,
+                    => {
+                        try stack.append(DotContext{
+                            .tag = .fn_arg,
+                            .expr_token_index = upper_index,
+                            .meta_index = meta_index,
+                        });
+                        return;
+                    },
+                    else => return error.UnexpectedToken,
+                }
+            },
+            .comma => {
+                // commas only matter when outside of braces and before final '('
+                if (braces_depth == even and parens_depth == even) meta_index += 1;
+            },
+            // Exit conditions
+            .semicolon => return error.NotFound, // generic exit; maybe also .keyword_(var/const)
+            else => {},
+        }
+    }
+
+    return error.NotFound;
+}
+
+fn getVarAccessContainerNode(
+    builder: *Builder,
+    loc: offsets.Loc,
+    dot_context: DotContext,
+) error{OutOfMemory}!?Analyser.Type {
+    const analyser = builder.analyser;
+    const handle = builder.orig_handle;
+    const symbol_decl = try analyser.lookupSymbolGlobal(
+        handle,
+        handle.tree.source[loc.start..loc.end],
+        loc.end,
+    ) orelse return null;
+    var ty = try symbol_decl.resolveType(analyser) orelse return null;
+    if (try analyser.resolveDerefType(ty)) |derefd| ty = derefd;
+    const want_fn_ret_type = switch (dot_context.tag) {
+        .fn_arg,
+        => false,
+        .fn_ret,
+        .comparison,
+        => true,
+        else => return ty,
+    };
+    if (!ty.isFunc()) return null;
+    const fn_proto_node_handle = ty.data.other; // this assumes that function types can only be Ast nodes
+    const fn_proto_node = fn_proto_node_handle.node;
+    const fn_proto_handle = fn_proto_node_handle.handle;
+    if (want_fn_ret_type) {
+        var buf: [1]Ast.Node.Index = undefined;
+        const full_fn_proto = fn_proto_handle.tree.fullFnProto(&buf, fn_proto_node).?;
+        const has_body = fn_proto_handle.tree.nodes.items(.tag)[fn_proto_node] == .fn_decl;
+        const body = fn_proto_handle.tree.nodes.items(.data)[fn_proto_node].rhs;
+        ty = try analyser.resolveReturnType(full_fn_proto, fn_proto_handle, if (has_body) body else null) orelse return null;
+        if (try analyser.resolveUnwrapErrorUnionType(ty, .payload)) |unwrapped| ty = unwrapped;
+        return ty;
+    }
+    const fn_param_decl = Analyser.Declaration{
+        .function_parameter = .{
+            .func = fn_proto_node,
+            .param_index = @intCast(dot_context.meta_index),
+        },
+    };
+    const fn_param_decl_with_handle = Analyser.DeclWithHandle{
+        .decl = fn_param_decl,
+        .handle = fn_proto_handle,
+    };
+    return try fn_param_decl_with_handle.resolveType(analyser);
+    // XXX Unwrap?
+}
+
+fn getFieldAccessContainerNode(
+    builder: *Builder,
+    loc: offsets.Loc,
+    dot_context: DotContext,
+) error{OutOfMemory}!?Analyser.Type {
+    const analyser = builder.analyser;
+    const handle = builder.orig_handle;
+
+    var ty = try analyser.getFieldAccessType(handle, loc.end, loc) orelse return null;
+    if (try analyser.resolveDerefType(ty)) |derefd| ty = derefd;
+
+    // Unwrap `identifier.opt_enum_field = .` or `identifier.opt_cont_field = .{.`
+    switch (dot_context.tag) {
+        .assignment,
+        .field_init,
+        .array_elem_init,
+        => {
+            if (try analyser.resolveOptionalUnwrap(ty)) |unwrapped| ty = unwrapped;
+        },
+        else => {},
+    }
+    const want_fn_ret_type = switch (dot_context.tag) {
+        .fn_arg,
+        => false,
+        .fn_ret,
+        .comparison,
+        => true,
+        else => return ty,
+    };
+    if (!ty.isFunc()) return null;
+    const fn_proto_node_handle = ty.data.other; // this assumes that function types can only be Ast nodes
+    const fn_proto_node = fn_proto_node_handle.node;
+    const fn_proto_handle = fn_proto_node_handle.handle;
+    var buf: [1]Ast.Node.Index = undefined;
+    const full_fn_proto = fn_proto_handle.tree.fullFnProto(&buf, fn_proto_node).?;
+    if (want_fn_ret_type) {
+        const has_body = fn_proto_handle.tree.nodes.items(.tag)[fn_proto_node] == .fn_decl;
+        const body = fn_proto_handle.tree.nodes.items(.data)[fn_proto_node].rhs;
+        ty = try analyser.resolveReturnType(full_fn_proto, fn_proto_handle, if (has_body) body else null) orelse return null;
+        if (try analyser.resolveUnwrapErrorUnionType(ty, .payload)) |unwrapped| ty = unwrapped;
+        return ty;
+    }
+    const has_self_param = try analyser.hasSelfParam(ty);
+    const fn_param_decl = Analyser.Declaration{
+        .function_parameter = .{
+            .func = fn_proto_node,
+            .param_index = @intCast(dot_context.meta_index + @intFromBool(has_self_param)),
+        },
+    };
+    const fn_param_decl_with_handle = Analyser.DeclWithHandle{
+        .decl = fn_param_decl,
+        .handle = fn_proto_handle,
+    };
+    return try fn_param_decl_with_handle.resolveType(analyser);
+    // XXX Unwrap?
+}
+
+fn getBuiltinContainerNode(
+    builder: *Builder,
+    loc: offsets.Loc,
+    dot_context: DotContext,
+) error{OutOfMemory}!?Analyser.Type {
+    if (dot_context.tag != .fn_arg) return null;
+    return resolveBuiltinFnArg(
+        builder.analyser,
+        dot_context.meta_index,
+        builder.orig_handle.tree.source[loc.start..loc.end],
+    );
+}
+
+fn getKeywordFnContainerNode(
+    builder: *Builder,
+    tag: std.zig.Token.Tag,
+    dot_context: DotContext,
+) error{OutOfMemory}!?Analyser.Type {
+    if (dot_context.tag != .fn_arg) return null;
+    const maybe_type_name: ?[]const u8 = switch (tag) {
+        .keyword_addrspace => switch (dot_context.meta_index) {
+            0 => "AddressSpace",
+            else => null,
+        },
+        .keyword_callconv => switch (dot_context.meta_index) {
+            0 => "CallingConvention",
+            else => null,
+        },
+        else => null,
+    };
+    return builder.analyser.instanceStdBuiltinType(maybe_type_name orelse return null);
+}
+
+fn getEnumLiteralContainerNode(
+    builder: *Builder,
+    loc: offsets.Loc,
+    dot_context: DotContext,
+    current_type: ?Analyser.Type,
+) error{OutOfMemory}!?Analyser.Type {
+    std.log.debug("ct: {?}\ndc: {}", .{ current_type, dot_context });
+    const ty = current_type orelse {
+        // Lookup based on dctx, ie var/field access
+        return null;
+    };
+    const node = switch (ty.data) {
+        // .pointer, // []S
+        .other => |n| n,
+    };
+    _ = node; // autofix
+    // if struct{S}, ie a tuple => return elem type else return ty;
+    if (true) {
+        return null;
+    }
+    const analyser = builder.analyser;
+    // const handle = if (current_type) |ty| current_type.?.data.other.handle;
+    const handle = builder.orig_handle;
+    // const arena = builder.arena;
+    const alleged_field_name = handle.tree.source[loc.start + 1 .. loc.end];
+    const dot_index = offsets.sourceIndexToTokenIndex(handle.tree, loc.start);
+    const el_dot_context = getSwitchOrStructInitContext(handle.tree, dot_index) orelse return;
+    const containers = try collectContainerNodes(
+        builder,
+        handle,
+        offsets.tokenToLoc(handle.tree, el_dot_context.identifier_token_index).end,
+        el_dot_context,
+    );
+    for (containers) |container| {
+        const container_instance = try container.instanceTypeVal(analyser) orelse container;
+        const member_decl = try container_instance.lookupSymbol(analyser, alleged_field_name) orelse continue;
+        var member_type = try member_decl.resolveType(analyser) orelse continue;
+        // Unwrap `x{ .fld_w_opt_type =`
+        if (try analyser.resolveOptionalUnwrap(member_type)) |unwrapped| member_type = unwrapped;
+        // try types_with_handles.append(arena, member_type);
+    }
 }
