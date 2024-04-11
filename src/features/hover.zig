@@ -42,6 +42,7 @@ fn hoverSymbolRecursive(
         try doc_strings.append(arena, doc);
 
     var is_fn = false;
+    var var_init_node: Ast.Node.Index = 0; // 0 => do not use, else => ok
 
     const def_str = switch (decl_handle.decl) {
         .ast_node => |node| def: {
@@ -54,6 +55,8 @@ fn hoverSymbolRecursive(
             if (tree.fullVarDecl(node)) |var_decl| {
                 var struct_init_buf: [2]Ast.Node.Index = undefined;
                 var type_node: Ast.Node.Index = 0;
+
+                var_init_node = var_decl.ast.init_node;
 
                 if (var_decl.ast.type_node != 0) {
                     type_node = var_decl.ast.type_node;
@@ -109,14 +112,51 @@ fn hoverSymbolRecursive(
     };
 
     var resolved_type_str: []const u8 = "unknown";
-    if (try decl_handle.resolveType(analyser)) |resolved_type| {
+    if (try decl_handle.resolveType(analyser)) |resolved_type| rts: {
         if (try resolved_type.docComments(arena)) |doc|
             try doc_strings.append(arena, doc);
         try analyser.referencedTypes(
             resolved_type,
             &reference_collector,
         );
-        resolved_type_str = try std.fmt.allocPrint(arena, "{}", .{resolved_type.fmt(analyser, .{ .truncate_container_decls = false })});
+        if (resolved_type.data == .ip_index) ip_index: {
+            if (var_init_node == 0) break :ip_index;
+            const nslc = offsets.nodeToSlice(tree, var_init_node);
+            if (nslc.len == 0) break :ip_index;
+            var detail: []const u8 = "";
+            switch (analyser.ip.typeOf(resolved_type.data.ip_index.index)) {
+                .comptime_int_type => {
+                    if (nslc[0] == '-') {
+                        const val = std.fmt.parseInt(i64, nslc, 0) catch break :ip_index;
+                        const uval: u64 = @bitCast(val);
+                        detail = try std.fmt.allocPrint(arena, "Dec: {}\nOct: 0o{o}\nHex: 0x{x}\nBin: 0b{b}", .{ val, uval, uval, uval });
+                    } else {
+                        const val = std.fmt.parseInt(u64, nslc, 0) catch break :ip_index;
+                        detail = try std.fmt.allocPrint(arena, "Dec: {}\nOct: 0o{o}\nHex: 0x{x}\nBin: 0b{b}", .{ val, val, val, val });
+                    }
+                },
+                .i8_type, .i16_type, .i32_type, .i64_type => {
+                    const val = std.fmt.parseInt(i64, nslc, 0) catch break :ip_index;
+                    const uval: u64 = @bitCast(val);
+                    detail = try std.fmt.allocPrint(arena, "Dec: {}\nOct: 0o{o}\nHex: 0x{x}\nBin: 0b{b}", .{ val, uval, uval, uval });
+                },
+                .u8_type, .u16_type, .u32_type, .u64_type => {
+                    const val = std.fmt.parseInt(u64, nslc, 0) catch break :ip_index;
+                    detail = try std.fmt.allocPrint(arena, "Dec: {}\nOct: 0o{o}\nHex: 0x{x}\nBin: 0b{b}", .{ val, val, val, val });
+                },
+                else => break :ip_index,
+            }
+            resolved_type_str = try std.fmt.allocPrint(
+                arena,
+                "({})\n\n{s}",
+                .{
+                    resolved_type.fmt(analyser, .{ .truncate_container_decls = false }),
+                    detail,
+                },
+            );
+            break :rts;
+        }
+        resolved_type_str = try std.fmt.allocPrint(arena, "({})", .{resolved_type.fmt(analyser, .{ .truncate_container_decls = false })});
     }
     const referenced_types: []const Analyser.ReferencedType = type_references.keys();
 
@@ -126,7 +166,7 @@ fn hoverSymbolRecursive(
         if (is_fn) {
             try writer.print("```zig\n{s}\n```", .{def_str});
         } else {
-            try writer.print("```zig\n{s}\n```\n```zig\n({s})\n```", .{ def_str, resolved_type_str });
+            try writer.print("```zig\n{s}\n```\n```zig\n{s}\n```", .{ def_str, resolved_type_str });
         }
         for (doc_strings.items) |doc|
             try writer.print("\n\n{s}", .{doc});
@@ -143,7 +183,7 @@ fn hoverSymbolRecursive(
         if (is_fn) {
             try writer.print("{s}", .{def_str});
         } else {
-            try writer.print("{s}\n({s})", .{ def_str, resolved_type_str });
+            try writer.print("{s}\n{s}", .{ def_str, resolved_type_str });
         }
         for (doc_strings.items) |doc|
             try writer.print("\n\n{s}", .{doc});
