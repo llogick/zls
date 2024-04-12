@@ -471,8 +471,8 @@ fn walkNode(
         => walkLhsNode(context, tree, node_idx),
 
         .test_decl,
-        .@"defer",
         .@"break",
+        .@"defer",
         .anyframe_type,
         => walkRhsNode(context, tree, node_idx),
 
@@ -855,6 +855,18 @@ fn walkBlockNodeKeepOpen(
                         name,
                         .{ .assign_destructure = .{ .node = idx, .index = @intCast(i) } },
                         .other,
+                    );
+                }
+            },
+            .@"break" => {
+                if (data[node_idx].lhs == 0) continue;
+                const br_first_token = tree.firstToken(idx);
+                if (token_tags[br_first_token + 1] == .colon and token_tags[br_first_token + 2] == .identifier) {
+                    const label_identifier_token = br_first_token + 2;
+                    try scope.pushDeclaration(
+                        offsets.identifierTokenToNameSlice(tree, label_identifier_token),
+                        .{ .label = .{ .identifier = label_identifier_token, .block = idx } },
+                        .label,
                     );
                 }
             },
