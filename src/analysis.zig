@@ -2905,6 +2905,8 @@ pub fn getFieldAccessType(
     var tokenizer = std.zig.Tokenizer.init(held_range);
     var current_type: ?Type = null;
 
+    var do_unwrap_error_payload = false; // .keyword_try seen
+
     while (true) {
         const tok = tokenizer.next();
         switch (tok.tag) {
@@ -2954,7 +2956,29 @@ pub fn getFieldAccessType(
             },
             .l_paren => {
                 if (current_type == null) {
-                    return null;
+                    // Find the closing right paren
+                    var paren_count: usize = 1;
+                    var next = tokenizer.next();
+                    while (next.tag != .eof) : (next = tokenizer.next()) {
+                        if (next.tag == .r_paren) {
+                            paren_count -= 1;
+                            if (paren_count == 0) break;
+                        } else if (next.tag == .l_paren) {
+                            paren_count += 1;
+                        }
+                    } else return null;
+                    current_type = try getFieldAccessType(
+                        analyser,
+                        handle,
+                        source_index,
+                        .{
+                            // tok.loc and next.loc are offsets within held_range,
+                            // add to loc.start to get offsets within handle.tree.source
+                            .start = loc.start + tok.loc.end,
+                            .end = loc.start + next.loc.start,
+                        },
+                    ) orelse return null;
+                    continue;
                 }
                 const ty = try analyser.resolveFuncProtoOfCallable(current_type.?) orelse return null;
 
@@ -2976,6 +3000,12 @@ pub fn getFieldAccessType(
 
                 // TODO Actually bind params here when calling functions instead of just skipping args.
                 current_type = try analyser.resolveReturnType(func, current_type_handle, if (has_body) body else null) orelse return null;
+
+                if (do_unwrap_error_payload) {
+                    if (try analyser.resolveUnwrapErrorUnionType(current_type.?, .payload)) |unwrapped| current_type = unwrapped;
+                    do_unwrap_error_payload = false;
+                }
+
                 // Skip to the right paren
                 var paren_count: usize = 1;
                 var next = tokenizer.next();
@@ -3037,6 +3067,8 @@ pub fn getFieldAccessType(
                     return null;
                 }
             },
+            // only hit when `(try foo())` otherwise getPositionContext never includes the `try` keyword
+            .keyword_try => do_unwrap_error_payload = true,
             else => {
                 log.debug("Unimplemented token: {}", .{tok.tag});
                 return null;
@@ -3119,6 +3151,8 @@ pub const PositionContext = union(enum) {
     global_error_set,
     enum_literal: offsets.Loc,
     number_literal: offsets.Loc,
+    /// XXX: Internal use only, currently points to the loc of the first l_paren
+    parens_expr: offsets.Loc,
     pre_label,
     label: bool,
     other,
@@ -3136,6 +3170,7 @@ pub const PositionContext = union(enum) {
             .var_access => |r| r,
             .enum_literal => |r| r,
             .number_literal => |r| r,
+            .parens_expr => |r| r,
             .pre_label => null,
             .label => null,
             .other => null,
@@ -3338,7 +3373,10 @@ pub fn getPositionContext(
                     .field_access => {},
                     else => curr_ctx.ctx = .empty,
                 },
-                .l_paren => try stack.append(allocator, .{ .ctx = .empty, .stack_id = .Paren }),
+                .l_paren => {
+                    if (curr_ctx.ctx == .empty) curr_ctx.ctx = .{ .parens_expr = tok.loc };
+                    try stack.append(allocator, .{ .ctx = .empty, .stack_id = .Paren });
+                },
                 .l_bracket => try stack.append(allocator, .{ .ctx = .empty, .stack_id = .Bracket }),
                 .r_paren => {
                     _ = stack.pop();
