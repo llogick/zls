@@ -1664,8 +1664,8 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
         => {
             var buffer: [2]Ast.Node.Index = undefined;
             const params = ast.builtinCallParams(tree, node, &buffer).?;
-
             const call_name = tree.tokenSlice(main_tokens[node]);
+
             if (std.mem.eql(u8, call_name, "@This")) {
                 if (params.len != 0) return null;
                 return try innermostContainer(handle, starts[tree.firstToken(node)]);
@@ -1700,19 +1700,7 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
             }
 
             if (std.mem.eql(u8, call_name, "@typeInfo")) {
-                const zig_lib_path = analyser.store.config.zig_lib_path orelse return null;
-                const builtin_path = try std.fs.path.join(analyser.arena.allocator(), &.{ zig_lib_path, "std", "builtin.zig" });
-                const builtin_uri = try URI.fromPath(analyser.arena.allocator(), builtin_path);
-
-                const builtin_handle = analyser.store.getOrLoadHandle(builtin_uri) orelse return null;
-                const builtin_root_struct_type: Type = .{
-                    .data = .{ .container = .{ .handle = builtin_handle, .scope = Scope.Index.root } },
-                    .is_type_val = true,
-                };
-
-                const builtin_type_decl = try builtin_root_struct_type.lookupSymbol(analyser, "Type") orelse return null;
-                const builtin_type = try builtin_type_decl.resolveType(analyser) orelse return null;
-                return try builtin_type.instanceTypeVal(analyser);
+                return analyser.instanceStdBuiltinType("Type");
             }
 
             if (std.mem.eql(u8, call_name, "@import")) {
@@ -1742,7 +1730,9 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
                     },
                     .is_type_val = true,
                 };
-            } else if (std.mem.eql(u8, call_name, "@cImport")) {
+            }
+
+            if (std.mem.eql(u8, call_name, "@cImport")) {
                 const cimport_uri = (try analyser.store.resolveCImport(handle, node)) orelse return null;
 
                 const new_handle = analyser.store.getOrLoadHandle(cimport_uri) orelse return null;
@@ -1757,6 +1747,7 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
                     .is_type_val = true,
                 };
             }
+
             if (std.mem.eql(u8, call_name, "@field")) {
                 if (params.len < 2) return null;
                 var field_name_node: NodeWithHandle = .{ .node = params[1], .handle = handle };
@@ -1792,7 +1783,11 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
                     .handle = handle,
                 })) orelse return null;
 
-                return try resolveFieldAccess(analyser, lhs, field_name[1 .. field_name.len - 1]);
+                return try analyser.resolveFieldAccess(lhs, field_name[1 .. field_name.len - 1]);
+            }
+
+            if (std.mem.eql(u8, call_name, "@src")) {
+                return analyser.instanceStdBuiltinType("SourceLocation");
             }
             if (std.mem.eql(u8, call_name, "@compileError")) {
                 return Type{ .data = .{ .compile_error = node_handle }, .is_type_val = false };
@@ -2928,6 +2923,24 @@ pub const ScopeWithHandle = struct {
     }
 };
 
+/// Look up `type_name` in 'zig_lib_path/std/builtin.zig' and return it as an instance
+/// Useful for functionality related to builtin fns
+pub fn instanceStdBuiltinType(analyser: *Analyser, type_name: []const u8) error{OutOfMemory}!?Type {
+    const zig_lib_path = try URI.fromPath(analyser.arena.allocator(), analyser.store.config.zig_lib_path orelse return null);
+
+    const builtin_uri = URI.pathRelative(analyser.arena.allocator(), zig_lib_path, "/std/builtin.zig") catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        else => return null,
+    };
+
+    const builtin_handle = analyser.store.getOrLoadHandle(builtin_uri) orelse return null;
+    const builtin_root_struct_type = Type.typeVal(.{ .node = 0, .handle = builtin_handle });
+
+    const builtin_type_decl = try builtin_root_struct_type.lookupSymbol(analyser, type_name) orelse return null;
+    const builtin_type = try builtin_type_decl.resolveType(analyser) orelse return null;
+    return try builtin_type.instanceTypeVal(analyser);
+}
+
 /// Collects all `@import`'s we can find into a slice of import paths (without quotes).
 pub fn collectImports(allocator: std.mem.Allocator, tree: Ast) error{OutOfMemory}!std.ArrayListUnmanaged([]const u8) {
     var imports = std.ArrayListUnmanaged([]const u8){};
@@ -3173,7 +3186,9 @@ pub fn getFieldAccessType(
                 current_type = (try analyser.resolveBracketAccessType(current_type orelse return null, kind)) orelse return null;
             },
             .builtin => {
-                if (std.mem.eql(u8, tokenizer.buffer[tok.loc.start..tok.loc.end], "@import")) {
+                const binfn_name = tokenizer.buffer[tok.loc.start..tok.loc.end];
+
+                if (std.mem.eql(u8, binfn_name, "@import")) {
                     if (tokenizer.next().tag != .l_paren) return null;
                     const import_str_tok = tokenizer.next(); // should be the .string_literal
                     if (import_str_tok.tag != .string_literal) return null;
@@ -3194,10 +3209,27 @@ pub fn getFieldAccessType(
                         .is_type_val = true,
                     };
                     _ = tokenizer.next(); // eat the .r_paren
-                } else {
-                    log.debug("Unhandled builtin: {s}", .{offsets.locToSlice(tokenizer.buffer, tok.loc)});
-                    return null;
+                    continue; // Outermost `while`
                 }
+
+                if (std.mem.eql(u8, binfn_name, "@typeInfo")) {
+                    current_type = try analyser.instanceStdBuiltinType("Type") orelse return null;
+                    // Skip to the right paren
+                    var paren_count: usize = 0;
+                    var next = tokenizer.next();
+                    while (next.tag != .eof) : (next = tokenizer.next()) {
+                        if (next.tag == .r_paren) {
+                            paren_count -= 1;
+                            if (paren_count == 0) break;
+                        } else if (next.tag == .l_paren) {
+                            paren_count += 1;
+                        }
+                    } else return null;
+                    continue; // Outermost `while`
+                }
+
+                log.debug("Unhandled builtin: {s}", .{offsets.locToSlice(tokenizer.buffer, tok.loc)});
+                return null;
             },
             // only hit when `(try foo())` otherwise getPositionContext never includes the `try` keyword
             .keyword_try => do_unwrap_error_payload = true,
@@ -3226,6 +3258,7 @@ pub const PositionContext = union(enum) {
     char_literal: offsets.Loc,
     /// XXX: Internal use only, currently points to the loc of the first l_paren
     parens_expr: offsets.Loc,
+    keyword: std.zig.Token.Tag,
     pre_label,
     label: bool,
     other,
@@ -3245,6 +3278,7 @@ pub const PositionContext = union(enum) {
             .number_literal => |r| r,
             .char_literal => |r| r,
             .parens_expr => |r| r,
+            .keyword => null,
             .pre_label => null,
             .label => null,
             .other => null,
@@ -3438,6 +3472,7 @@ pub fn getPositionContext(
                     .empty, .pre_label => curr_ctx.ctx = .{ .enum_literal = tok.loc },
                     .enum_literal => curr_ctx.ctx = .empty,
                     .field_access => {},
+                    .keyword => return .other, // no keyword can be `.`/`.*` accessed
                     .other => {},
                     .global_error_set => {},
                     .label => |filled| if (filled) {
@@ -3487,6 +3522,7 @@ pub fn getPositionContext(
                         return PositionContext{ .char_literal = tok.loc };
                     }
                 },
+                .keyword_callconv, .keyword_addrspace => curr_ctx.ctx = .{ .keyword = tok.tag },
                 else => curr_ctx.ctx = .empty,
             }
 
