@@ -2926,16 +2926,19 @@ pub const ScopeWithHandle = struct {
 /// Look up `type_name` in 'zig_lib_path/std/builtin.zig' and return it as an instance
 /// Useful for functionality related to builtin fns
 pub fn instanceStdBuiltinType(analyser: *Analyser, type_name: []const u8) error{OutOfMemory}!?Type {
-    const zig_lib_path = try URI.fromPath(analyser.arena.allocator(), analyser.store.config.zig_lib_path orelse return null);
-
-    const builtin_uri = URI.pathRelative(analyser.arena.allocator(), zig_lib_path, "/std/builtin.zig") catch |err| switch (err) {
-        error.OutOfMemory => |e| return e,
-        else => return null,
-    };
-
+    const zig_lib_path = analyser.store.config.zig_lib_path orelse return null;
+    const builtin_path = try std.fs.path.join(analyser.arena.allocator(), &.{ zig_lib_path, "std", "builtin.zig" });
+    const builtin_uri = try URI.fromPath(analyser.arena.allocator(), builtin_path);
     const builtin_handle = analyser.store.getOrLoadHandle(builtin_uri) orelse return null;
-    const builtin_root_struct_type = Type.typeVal(.{ .node = 0, .handle = builtin_handle });
-
+    const builtin_root_struct_type: Type = .{
+        .data = .{
+            .container = .{
+                .handle = builtin_handle,
+                .scope = Scope.Index.root,
+            },
+        },
+        .is_type_val = true,
+    };
     const builtin_type_decl = try builtin_root_struct_type.lookupSymbol(analyser, type_name) orelse return null;
     const builtin_type = try builtin_type_decl.resolveType(analyser) orelse return null;
     return try builtin_type.instanceTypeVal(analyser);
