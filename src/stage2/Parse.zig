@@ -874,23 +874,13 @@ fn parseGlobalVarDecl(p: *Parse) !Node.Index {
     return var_decl;
 }
 
-/// ContainerField
-///     <- doc_comment? KEYWORD_comptime? IDENTIFIER (COLON TypeExpr)? ByteAlign? (EQUAL Expr)?
-///      / doc_comment? KEYWORD_comptime? (IDENTIFIER COLON)? !KEYWORD_fn TypeExpr ByteAlign? (EQUAL Expr)?
+/// ContainerField <- doc_comment? KEYWORD_comptime? !KEYWORD_fn (IDENTIFIER COLON)? TypeExpr ByteAlign? (EQUAL Expr)?
 fn expectContainerField(p: *Parse) !Node.Index {
-    var main_token = p.tok_i;
     _ = p.eatToken(.keyword_comptime);
-    const tuple_like = p.token_tags[p.tok_i] != .identifier or p.token_tags[p.tok_i + 1] != .colon;
-    if (!tuple_like) {
-        main_token = p.assertToken(.identifier);
-    }
-
-    var align_expr: Node.Index = 0;
-    var type_expr: Node.Index = 0;
-    if (p.eatToken(.colon) != null or tuple_like) {
-        type_expr = try p.expectTypeExpr();
-        align_expr = try p.parseByteAlign();
-    }
+    const main_token = p.tok_i;
+    if (p.token_tags[p.tok_i] == .identifier and p.token_tags[p.tok_i + 1] == .colon) p.tok_i += 2;
+    const type_expr = try p.expectTypeExpr();
+    const align_expr = try p.parseByteAlign();
 
     const value_expr: Node.Index = if (p.eatToken(.equal) == null) 0 else try p.expectExpr();
 
@@ -1916,8 +1906,8 @@ fn parseTypeExpr(p: *Parse) Error!Node.Index {
         },
         .l_bracket => switch (p.token_tags[p.tok_i + 1]) {
             .asterisk => {
+                const l_bracket = p.nextToken();
                 _ = p.nextToken();
-                const asterisk = p.nextToken();
                 var sentinel: Node.Index = 0;
                 if (p.eatToken(.identifier)) |ident| {
                     const ident_slice = p.source[p.token_starts[ident]..p.token_starts[ident + 1]];
@@ -1934,7 +1924,7 @@ fn parseTypeExpr(p: *Parse) Error!Node.Index {
                     if (sentinel == 0 and mods.addrspace_node == 0) {
                         return p.addNode(.{
                             .tag = .ptr_type_aligned,
-                            .main_token = asterisk,
+                            .main_token = l_bracket,
                             .data = .{
                                 .lhs = mods.align_node,
                                 .rhs = elem_type,
@@ -1943,7 +1933,7 @@ fn parseTypeExpr(p: *Parse) Error!Node.Index {
                     } else if (mods.align_node == 0 and mods.addrspace_node == 0) {
                         return p.addNode(.{
                             .tag = .ptr_type_sentinel,
-                            .main_token = asterisk,
+                            .main_token = l_bracket,
                             .data = .{
                                 .lhs = sentinel,
                                 .rhs = elem_type,
@@ -1952,7 +1942,7 @@ fn parseTypeExpr(p: *Parse) Error!Node.Index {
                     } else {
                         return p.addNode(.{
                             .tag = .ptr_type,
-                            .main_token = asterisk,
+                            .main_token = l_bracket,
                             .data = .{
                                 .lhs = try p.addExtra(Node.PtrType{
                                     .sentinel = sentinel,
@@ -1966,7 +1956,7 @@ fn parseTypeExpr(p: *Parse) Error!Node.Index {
                 } else {
                     return p.addNode(.{
                         .tag = .ptr_type_bit_range,
-                        .main_token = asterisk,
+                        .main_token = l_bracket,
                         .data = .{
                             .lhs = try p.addExtra(Node.PtrTypeBitRange{
                                 .sentinel = sentinel,
