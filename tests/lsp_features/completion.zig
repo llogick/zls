@@ -53,6 +53,7 @@ test "access root scope through '@This()' builtin" {
     , &.{
         .{ .label = "foo", .kind = .Constant },
         .{ .label = "Self", .kind = .Struct },
+        .{ .label = "bar", .kind = .Struct },
     });
 }
 
