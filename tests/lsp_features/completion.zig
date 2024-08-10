@@ -2485,9 +2485,10 @@ test "completion - builtin fns return type" {
         \\    src.<cursor>
         \\}
     , &.{
-        .{ .label = "line", .kind = .Field, .detail = "u32" },
+        .{ .label = "module", .kind = .Field, .detail = "[:0]const u8" },
         .{ .label = "file", .kind = .Field, .detail = "[:0]const u8" },
         .{ .label = "fn_name", .kind = .Field, .detail = "[:0]const u8" },
+        .{ .label = "line", .kind = .Field, .detail = "u32" },
         .{ .label = "column", .kind = .Field, .detail = "u32" },
     });
     try testCompletion(
