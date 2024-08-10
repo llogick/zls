@@ -279,6 +279,24 @@ test "var decl" {
     , .{ .kind = .Type });
 }
 
+test "function with an optional return type" {
+    try testInlayHints(
+        \\const T<type> = struct { a: u8 };
+        \\ fn thing(a: u32, b: i32) ?T {
+        \\     return .{ .a<u8> = 1 };
+        \\}
+    , .{ .kind = .Type });
+}
+
+test "function with an inferred error(set) and an optional return type" {
+    try testInlayHints(
+        \\const T<type> = struct { a: u8 };
+        \\ fn thing(a: u32, b: i32) !?T {
+        \\     return .{ .a<u8> = 1 };
+        \\}
+    , .{ .kind = .Type });
+}
+
 test "function alias" {
     try testInlayHints(
         \\fn foo(alpha: u32) void {

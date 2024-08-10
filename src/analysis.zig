@@ -4353,6 +4353,8 @@ pub fn lookupSymbolFieldInit(
     if (try analyser.resolveUnwrapErrorUnionType(container_type, .payload)) |unwrapped|
         container_type = unwrapped;
 
+    container_type.is_type_val = false; // `resolveOptionalUnwrap` expects an "instance"
+
     if (try analyser.resolveOptionalUnwrap(container_type)) |unwrapped|
         container_type = unwrapped;
 
