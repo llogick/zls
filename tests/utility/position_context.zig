@@ -423,36 +423,35 @@ test "string literal" {
 }
 
 test "global error set" {
-    // TODO why is this a .var_access instead of a .global_error_set?
-    // try testContext(
-    //     \\fn foo() <cursor>error!void {
-    // ,
-    //     .global_error_set,
-    //     null,
-    // );
+    try testContext(
+        \\fn foo() <cursor>error!void {
+    ,
+        .global_error_set,
+        "error",
+    );
     try testContext(
         \\fn foo() erro<cursor>r!void {
     ,
         .global_error_set,
-        null,
+        "error",
     );
     try testContext(
         \\fn foo() error<cursor>!void {
     ,
         .global_error_set,
-        null,
+        "error",
     );
     try testContext(
         \\fn foo() error<cursor>.!void {
     ,
         .global_error_set,
-        null,
+        "error",
     );
     try testContext(
         \\fn foo() error.<cursor>!void {
     ,
         .global_error_set,
-        null,
+        "error",
     );
 
     // TODO this should probably also be .global_error_set

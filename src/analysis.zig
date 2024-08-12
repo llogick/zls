@@ -727,7 +727,7 @@ fn findReturnStatement(tree: Ast, body: Ast.Node.Index) ?Ast.Node.Index {
 
 pub fn resolveReturnType(analyser: *Analyser, fn_decl: Ast.full.FnProto, handle: *DocumentStore.Handle, fn_body: ?Ast.Node.Index) error{OutOfMemory}!?Type {
     const tree = handle.tree;
-    if (isTypeFunction(tree, fn_decl) and fn_body != null) {
+    if (fn_body != null and isTypeFunction(tree, fn_decl)) {
         // If this is a type function and it only contains a single return statement that returns
         // a container declaration, we will return that declaration.
         const ret = findReturnStatement(tree, fn_body.?) orelse return null;
@@ -3255,7 +3255,7 @@ pub const PositionContext = union(enum) {
     string_literal: offsets.Loc,
     field_access: offsets.Loc,
     var_access: offsets.Loc,
-    global_error_set,
+    global_error_set: offsets.Loc,
     enum_literal: offsets.Loc,
     number_literal: offsets.Loc,
     char_literal: offsets.Loc,
@@ -3286,7 +3286,7 @@ pub const PositionContext = union(enum) {
             .label => null,
             .other => null,
             .empty => null,
-            .global_error_set => null,
+            .global_error_set => |r| r,
         };
     }
 };
@@ -3511,7 +3511,7 @@ pub fn getPositionContext(
                         (try peek(allocator, &stack)).ctx = .empty;
                     }
                 },
-                .keyword_error => curr_ctx.ctx = .global_error_set,
+                .keyword_error => curr_ctx.ctx = .{ .global_error_set = tok.loc },
                 .number_literal => {
                     if (tok.loc.start <= doc_index and tok.loc.end >= doc_index) {
                         return PositionContext{ .number_literal = tok.loc };

@@ -1900,6 +1900,44 @@ test "error union" {
     });
 }
 
+test "error." {
+    try testCompletion(
+        \\const Birdie = error{Canary};
+        \\const Errors = error{E1} || error{E2} || nested.Error;
+        \\const nested = struct {
+        \\    const Error = error{E3};
+        \\};
+        \\fn foo() (Errors || error{E4})!void {
+        \\    return error.<cursor>;
+        \\}
+    , &.{
+        .{ .label = "E1", .kind = .EnumMember },
+        .{ .label = "E2", .kind = .EnumMember },
+        .{ .label = "E3", .kind = .EnumMember },
+        .{ .label = "E4", .kind = .EnumMember },
+    });
+    try testCompletion(
+        \\const Birdie = error{Canary};
+        \\const Errors = error{E1} || error{E2} || nested.Error;
+        \\const nested = struct {
+        \\    const Error = error{E3};
+        \\};
+        \\const nm = struct {
+        \\    fn foo() (Errors || error{E4})!void {}
+        \\};
+        \\fn baz() !void {
+        \\    nm.foo() catch |err| switch (err) {
+        \\        error.<cursor>
+        \\    };
+        \\}
+    , &.{
+        .{ .label = "E1", .kind = .EnumMember },
+        .{ .label = "E2", .kind = .EnumMember },
+        .{ .label = "E3", .kind = .EnumMember },
+        .{ .label = "E4", .kind = .EnumMember },
+    });
+}
+
 test "struct init" {
     try testCompletion(
         \\const S = struct {

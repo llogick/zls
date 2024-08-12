@@ -784,6 +784,79 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
     try builder.completions.appendSlice(builder.arena, completions.keys());
 }
 
+fn completeError(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!?void {
+    const tracy_zone = tracy.trace(@src());
+    defer tracy_zone.end();
+
+    const tree = builder.orig_handle.tree;
+    const token_tags = tree.tokens.items(.tag);
+
+    const kw_err_tok_i = offsets.sourceIndexToTokenIndex(tree, loc.start);
+    if (kw_err_tok_i < 1 or kw_err_tok_i > tree.tokens.len - 2) return null;
+    const dot_token_index = kw_err_tok_i + 1;
+    if (token_tags[dot_token_index] != .period) return null;
+    if (token_tags[kw_err_tok_i] != .keyword_error) return null;
+
+    if (token_tags[kw_err_tok_i - 1] == .keyword_return) {
+        const doc_scope = try builder.orig_handle.getDocumentScope();
+        const fn_scope = Analyser.innermostFunctionScopeAtIndex(doc_scope, loc.start).unwrap() orelse return null;
+        const fn_node = doc_scope.getScopeAstNode(fn_scope).?;
+        var buf: [1]Ast.Node.Index = undefined;
+        const func = tree.fullFnProto(&buf, fn_node).?;
+        const ret_type = try builder.analyser.resolveReturnType(func, builder.orig_handle, null) orelse return null;
+        const err_type = try builder.analyser.resolveUnwrapErrorUnionType(ret_type, .error_set) orelse return null;
+        // From here on err_type.data could be
+        // A: .container => .error_set_decl/.container_decl_two
+        // B: .other => .merge_error_sets
+        return switch (err_type.data) {
+            .container => try collectErrorSetFields(
+                builder,
+                err_type.data.container.handle,
+                err_type.data.container.toNode(),
+            ) orelse try collectContainerFields(builder, .enum_literal, err_type),
+            .other => try collectErrorSetFields(
+                builder,
+                err_type.data.other.handle,
+                err_type.data.other.node,
+            ),
+            else => null,
+        };
+    }
+    var dot_context = getSwitchOrStructInitContext(tree, dot_token_index) orelse return null;
+    if (dot_context.likely != .switch_case) return null;
+
+    // The std parser can't handle the `switch (err) {error.}` => find the fn manually
+    if (token_tags[dot_context.identifier_token_index - 6] != .keyword_catch) return null;
+    dot_context.identifier_token_index -= 7;
+    if (token_tags[dot_context.identifier_token_index] != .r_paren) return null;
+
+    var depth: usize = 0;
+    while (dot_context.identifier_token_index > 0) : (dot_context.identifier_token_index -= 1) {
+        switch (token_tags[dot_context.identifier_token_index]) {
+            .r_paren => depth += 1,
+            .l_paren => {
+                depth -= 1;
+                if (depth != 0) continue;
+                dot_context.identifier_token_index -= 1;
+                dot_context.need_ret_type = true;
+                dot_context.likely = .err_switch_case;
+                break;
+            },
+            .semicolon => return null,
+            else => {},
+        }
+    }
+    const containers = try collectContainerNodes(
+        builder,
+        builder.orig_handle,
+        offsets.tokenToLoc(tree, dot_context.identifier_token_index).end,
+        dot_context,
+    );
+    for (containers) |container| {
+        try collectContainerFields(builder, dot_context.likely, container);
+    }
+}
+
 pub fn completionAtIndex(
     server: *Server,
     analyser: *Analyser,
@@ -818,7 +891,7 @@ pub fn completionAtIndex(
         .builtin => try completeBuiltin(&builder),
         .var_access, .empty => try completeGlobal(&builder),
         .field_access => |loc| try completeFieldAccess(&builder, loc),
-        .global_error_set => try globalSetCompletions(&builder, .error_set),
+        .global_error_set => |loc| try completeError(&builder, loc) orelse try globalSetCompletions(&builder, .error_set),
         .enum_literal => |loc| try completeDot(&builder, loc),
         .label => try completeLabel(&builder),
         .import_string_literal,
@@ -983,6 +1056,7 @@ const EnumLiteralContext = struct {
         /// `S{.`, `var s:S = .{.`, `f(.{.` or `a.f(.{.`
         struct_field,
         switch_case,
+        err_switch_case,
         // TODO Abort, don't list any enums
         //  - lhs of `=` is a fn call
         //  - able to resolve the type of a switch condition, but it is a struct
@@ -1235,6 +1309,62 @@ fn collectContainerFields(
     }
 }
 
+fn collectErrorSetFields(
+    builder: *Builder,
+    handle: *DocumentStore.Handle,
+    node: Ast.Node.Index,
+) error{OutOfMemory}!?void {
+    const tree = handle.tree;
+    const ntags = tree.nodes.items(.tag);
+    const ndata = tree.nodes.items(.data);
+    switch (ntags[node]) {
+        .error_set_decl => {
+            var it = ast.ErrorSetIterator.init(tree, node);
+            while (it.next()) |identifier_token| {
+                const name = tree.tokenSlice(identifier_token);
+                try builder.completions.append(builder.arena, .{
+                    .label = name,
+                    .kind = .EnumMember,
+                    .insertText = name,
+                });
+            }
+        },
+        .merge_error_sets => {
+            _ = try collectErrorSetFields(
+                builder,
+                handle,
+                ndata[node].lhs,
+            );
+            _ = try collectErrorSetFields(
+                builder,
+                handle,
+                ndata[node].rhs,
+            );
+        },
+        // const Error = error{OOM} || OtherError || some.T.Error;
+        .identifier,
+        .field_access,
+        => {
+            if (try builder.analyser.resolveTypeOfNode(.{ .node = node, .handle = handle })) |ty| {
+                _ = switch (ty.data) {
+                    .container => try collectErrorSetFields(
+                        builder,
+                        ty.data.container.handle,
+                        ty.data.container.toNode(),
+                    ) orelse try collectContainerFields(builder, .enum_literal, ty),
+                    .other => try collectErrorSetFields(
+                        builder,
+                        ty.data.other.handle,
+                        ty.data.other.node,
+                    ),
+                    else => {},
+                };
+            }
+        },
+        else => return null,
+    }
+}
+
 /// Resolves `identifier`/`path.to.identifier` at `source_index`
 /// If the `identifier` is a container `fn_arg_index` is unused
 /// If the `identifier` is a `fn_name`/`identifier.fn_name`, tries to resolve
@@ -1399,6 +1529,30 @@ fn collectVarAccessContainerNodes(
             const has_body = fn_proto_handle.tree.nodes.items(.tag)[fn_proto_node] == .fn_decl;
             const body = fn_proto_handle.tree.nodes.items(.data)[fn_proto_node].rhs;
             var node_type = try analyser.resolveReturnType(full_fn_proto, fn_proto_handle, if (has_body) body else null) orelse return;
+            switch (dot_context.likely) {
+                .err_switch_case => {
+                    const ret_type = try builder.analyser.resolveReturnType(full_fn_proto, fn_proto_handle, null) orelse return;
+                    const err_type = try builder.analyser.resolveUnwrapErrorUnionType(ret_type, .error_set) orelse return;
+                    // From here on err_type.data could be
+                    // A: .container => .error_set_decl/.container_decl_two
+                    // B: .other => .merge_error_sets
+                    _ = switch (err_type.data) {
+                        .container => try collectErrorSetFields(
+                            builder,
+                            err_type.data.container.handle,
+                            err_type.data.container.toNode(),
+                        ) orelse try collectContainerFields(builder, .enum_literal, err_type),
+                        .other => try collectErrorSetFields(
+                            builder,
+                            err_type.data.other.handle,
+                            err_type.data.other.node,
+                        ),
+                        else => {},
+                    };
+                    return;
+                },
+                else => {},
+            }
             if (try analyser.resolveUnwrapErrorUnionType(node_type, .payload)) |unwrapped| node_type = unwrapped;
             try node_type.getAllTypesWithHandlesArrayList(arena, types_with_handles);
             return;
@@ -1460,6 +1614,30 @@ fn collectFieldAccessContainerNodes(
                 const has_body = fn_proto_handle.tree.nodes.items(.tag)[fn_proto_node] == .fn_decl;
                 const body = fn_proto_handle.tree.nodes.items(.data)[fn_proto_node].rhs;
                 node_type = try analyser.resolveReturnType(full_fn_proto, fn_proto_handle, if (has_body) body else null) orelse continue;
+                switch (dot_context.likely) {
+                    .err_switch_case => {
+                        const ret_type = try builder.analyser.resolveReturnType(full_fn_proto, fn_proto_handle, null) orelse return;
+                        const err_type = try builder.analyser.resolveUnwrapErrorUnionType(ret_type, .error_set) orelse return;
+                        // From here on err_type.data could be
+                        // A: .container => .error_set_decl/.container_decl_two
+                        // B: .other => .merge_error_sets
+                        _ = switch (err_type.data) {
+                            .container => try collectErrorSetFields(
+                                builder,
+                                err_type.data.container.handle,
+                                err_type.data.container.toNode(),
+                            ) orelse try collectContainerFields(builder, .enum_literal, err_type),
+                            .other => try collectErrorSetFields(
+                                builder,
+                                err_type.data.other.handle,
+                                err_type.data.other.node,
+                            ),
+                            else => {},
+                        };
+                        return;
+                    },
+                    else => {},
+                }
                 if (try analyser.resolveUnwrapErrorUnionType(node_type, .payload)) |unwrapped| node_type = unwrapped;
                 try node_type.getAllTypesWithHandlesArrayList(arena, types_with_handles);
                 continue;
