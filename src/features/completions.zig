@@ -805,22 +805,7 @@ fn completeError(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!?void {
         const func = tree.fullFnProto(&buf, fn_node).?;
         const ret_type = try builder.analyser.resolveReturnType(func, builder.orig_handle, null) orelse return null;
         const err_type = try builder.analyser.resolveUnwrapErrorUnionType(ret_type, .error_set) orelse return null;
-        // From here on err_type.data could be
-        // A: .container => .error_set_decl/.container_decl_two
-        // B: .other => .merge_error_sets
-        return switch (err_type.data) {
-            .container => try collectErrorSetFields(
-                builder,
-                err_type.data.container.handle,
-                err_type.data.container.toNode(),
-            ) orelse try collectContainerFields(builder, .enum_literal, err_type),
-            .other => try collectErrorSetFields(
-                builder,
-                err_type.data.other.handle,
-                err_type.data.other.node,
-            ),
-            else => null,
-        };
+        return collectErrorTypeFields(builder, err_type);
     }
     var dot_context = getSwitchOrStructInitContext(tree, dot_token_index) orelse return null;
     if (dot_context.likely != .switch_case) return null;
@@ -1309,7 +1294,26 @@ fn collectContainerFields(
     }
 }
 
-fn collectErrorSetFields(
+fn collectErrorTypeFields(
+    builder: *Builder,
+    err_type: Analyser.Type,
+) error{OutOfMemory}!?void {
+    return switch (err_type.data) {
+        .container => try collectErrorNodeFields(
+            builder,
+            err_type.data.container.handle,
+            err_type.data.container.toNode(),
+        ) orelse try collectContainerFields(builder, .enum_literal, err_type),
+        .other => try collectErrorNodeFields(
+            builder,
+            err_type.data.other.handle,
+            err_type.data.other.node,
+        ),
+        else => null,
+    };
+}
+
+fn collectErrorNodeFields(
     builder: *Builder,
     handle: *DocumentStore.Handle,
     node: Ast.Node.Index,
@@ -1330,12 +1334,12 @@ fn collectErrorSetFields(
             }
         },
         .merge_error_sets => {
-            _ = try collectErrorSetFields(
+            _ = try collectErrorNodeFields(
                 builder,
                 handle,
                 ndata[node].lhs,
             );
-            _ = try collectErrorSetFields(
+            _ = try collectErrorNodeFields(
                 builder,
                 handle,
                 ndata[node].rhs,
@@ -1345,21 +1349,8 @@ fn collectErrorSetFields(
         .identifier,
         .field_access,
         => {
-            if (try builder.analyser.resolveTypeOfNode(.{ .node = node, .handle = handle })) |ty| {
-                _ = switch (ty.data) {
-                    .container => try collectErrorSetFields(
-                        builder,
-                        ty.data.container.handle,
-                        ty.data.container.toNode(),
-                    ) orelse try collectContainerFields(builder, .enum_literal, ty),
-                    .other => try collectErrorSetFields(
-                        builder,
-                        ty.data.other.handle,
-                        ty.data.other.node,
-                    ),
-                    else => {},
-                };
-            }
+            const ty = try builder.analyser.resolveTypeOfNode(.{ .node = node, .handle = handle }) orelse return;
+            _ = try collectErrorTypeFields(builder, ty);
         },
         else => return null,
     }
@@ -1533,22 +1524,7 @@ fn collectVarAccessContainerNodes(
                 .err_switch_case => {
                     const ret_type = try builder.analyser.resolveReturnType(full_fn_proto, fn_proto_handle, null) orelse return;
                     const err_type = try builder.analyser.resolveUnwrapErrorUnionType(ret_type, .error_set) orelse return;
-                    // From here on err_type.data could be
-                    // A: .container => .error_set_decl/.container_decl_two
-                    // B: .other => .merge_error_sets
-                    _ = switch (err_type.data) {
-                        .container => try collectErrorSetFields(
-                            builder,
-                            err_type.data.container.handle,
-                            err_type.data.container.toNode(),
-                        ) orelse try collectContainerFields(builder, .enum_literal, err_type),
-                        .other => try collectErrorSetFields(
-                            builder,
-                            err_type.data.other.handle,
-                            err_type.data.other.node,
-                        ),
-                        else => {},
-                    };
+                    _ = try collectErrorTypeFields(builder, err_type);
                     return;
                 },
                 else => {},
@@ -1618,22 +1594,7 @@ fn collectFieldAccessContainerNodes(
                     .err_switch_case => {
                         const ret_type = try builder.analyser.resolveReturnType(full_fn_proto, fn_proto_handle, null) orelse return;
                         const err_type = try builder.analyser.resolveUnwrapErrorUnionType(ret_type, .error_set) orelse return;
-                        // From here on err_type.data could be
-                        // A: .container => .error_set_decl/.container_decl_two
-                        // B: .other => .merge_error_sets
-                        _ = switch (err_type.data) {
-                            .container => try collectErrorSetFields(
-                                builder,
-                                err_type.data.container.handle,
-                                err_type.data.container.toNode(),
-                            ) orelse try collectContainerFields(builder, .enum_literal, err_type),
-                            .other => try collectErrorSetFields(
-                                builder,
-                                err_type.data.other.handle,
-                                err_type.data.other.node,
-                            ),
-                            else => {},
-                        };
+                        _ = try collectErrorTypeFields(builder, err_type);
                         return;
                     },
                     else => {},
