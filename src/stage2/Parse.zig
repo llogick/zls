@@ -3394,6 +3394,15 @@ fn parseSwitchProng(p: *Parse) !Node.Index {
                 try p.warn(.expected_expr);
                 p.tok_i += 1;
             }
+            if (p.token_tags[p.tok_i] == .keyword_error and p.token_tags[p.tok_i + 1] == .period and switch (p.token_tags[p.tok_i + 2]) {
+                .keyword_error, // `error.<cursor>\nerror.E => ..`, ie when preceding another entry
+                .r_brace, // `error.}`, ie single/last entry
+                => true,
+                else => false,
+            }) { // zls
+                try p.warn(.expected_expr);
+                p.tok_i += 2;
+            }
             const item = try p.parseSwitchItem();
             if (item == 0) break;
             try p.scratch.append(p.gpa, item);
