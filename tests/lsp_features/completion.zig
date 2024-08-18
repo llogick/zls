@@ -1938,6 +1938,33 @@ test "error." {
     });
 }
 
+test "return anon lit init" {
+    try testCompletion(
+        \\const Birdie = enum { beep };
+        \\const n = struct {
+        \\    const T = union(enum) { a: u1, b: u2 };
+        \\};
+        \\fn foo() ?n.T {
+        \\    return .<cursor>
+        \\}
+    , &.{
+        .{ .label = "a", .kind = .Field, .detail = "u1" },
+        .{ .label = "b", .kind = .Field, .detail = "u2" },
+    });
+    try testCompletion(
+        \\const Birdie = enum { beep };
+        \\const n = struct {
+        \\    const T = union(enum) { a: u1, b: u2 };
+        \\};
+        \\fn foo() !?n.T {
+        \\    return .{.<cursor>}
+        \\}
+    , &.{
+        .{ .label = "a", .kind = .Field, .detail = "u1" },
+        .{ .label = "b", .kind = .Field, .detail = "u2" },
+    });
+}
+
 test "struct init" {
     try testCompletion(
         \\const S = struct {

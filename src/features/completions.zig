@@ -602,7 +602,7 @@ fn completeDot(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!void {
     if (dot_token_index < 2) return;
 
     blk: {
-        const dot_context = getEnumLiteralContext(tree, dot_token_index) orelse break :blk;
+        const dot_context = getEnumLiteralContext(builder, dot_token_index) orelse break :blk;
         const containers = try collectContainerNodes(
             builder,
             builder.orig_handle,
@@ -807,7 +807,7 @@ fn completeError(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!?void {
         const err_type = try builder.analyser.resolveUnwrapErrorUnionType(ret_type, .error_set) orelse return null;
         return collectErrorTypeFields(builder, err_type);
     }
-    var dot_context = getSwitchOrStructInitContext(tree, dot_token_index) orelse return null;
+    var dot_context = getSwitchOrStructInitContext(builder, dot_token_index) orelse return null;
     if (dot_context.likely != .switch_case) return null;
 
     // The std parser can't handle the `switch (err) {error.}` => find the fn manually
@@ -1029,17 +1029,29 @@ fn globalSetCompletions(builder: *Builder, kind: enum { error_set, enum_set }) e
 // <--------------------------------------------------------------------------->
 
 const EnumLiteralContext = struct {
+    likely: Likely,
+    identifier_token_index: Ast.TokenIndex,
+    fn_arg_index: usize,
+    need_ret_type: bool,
+
     const Likely = enum { // TODO: better name, tagged union?
-        /// `mye: Enum = .`, `abc.field = .`, `f(.{.field = .`
         enum_literal,
-        /// Same as above, but`f() = .` or `identifier.f() = .` are ignored, ie lhs of `=` is a fn call
-        enum_assignment,
-        // `==`, `!=`
-        enum_comparison,
-        /// the enum is a fn arg, eg `f(.`
-        enum_arg,
-        /// `S{.`, `var s:S = .{.`, `f(.{.` or `a.f(.{.`
-        struct_field,
+        /// `e: Enum = .`
+        /// `s.field = .`
+        /// `f(.{.a1 = .`
+        /// If the type of the lhs value is an optional it should be unwrapped
+        assignment,
+        /// `==`, `!=`
+        comparison,
+        /// `f(.`
+        /// `fn_arg_index` indicates position
+        fn_arg,
+        /// `S{.`
+        /// `var s:S = .{.`
+        /// `f(.{.`
+        /// `a.f(.{.`
+        /// If the type of the lhs value is an optional it should be unwrapped
+        field,
         switch_case,
         err_switch_case,
         // TODO Abort, don't list any enums
@@ -1048,17 +1060,48 @@ const EnumLiteralContext = struct {
         //  ? Would this lead to confusion/perceived as the server not responding? Push an error diag ?
         // / Abort, don't list any enums
         // invalid,
+
+        pub fn shouldUnwrapOptional(self: *const @This()) bool {
+            return switch (self.*) {
+                .assignment, // eg `maybe_enum_val: ?Enum = .` or `some.opt_enum_type_field = .` or `fn f() ?T {return .}`
+                .field, // eg `some.opt_type_container_field = .{.`
+                => true,
+                else => false,
+            };
+        }
+
+        pub fn requiresDecor(self: *const @This(), kind: enum { braces, assignment_operator }) bool {
+            return switch (kind) {
+                .braces => switch (self.*) {
+                    .field,
+                    .comparison,
+                    .switch_case,
+                    => false,
+                    else => true,
+                },
+                .assignment_operator => switch (self.*) {
+                    .comparison,
+                    .switch_case,
+                    => false,
+                    else => true,
+                },
+            };
+        }
     };
-    likely: Likely,
-    identifier_token_index: Ast.TokenIndex = 0,
-    fn_arg_index: usize = 0,
-    need_ret_type: bool = false,
+
+    const default: @This() = .{
+        .likely = .assignment,
+        .identifier_token_index = 0,
+        .fn_arg_index = 0,
+        .need_ret_type = false,
+    };
 };
 
 fn getEnumLiteralContext(
-    tree: Ast,
+    builder: *Builder,
     dot_token_index: Ast.TokenIndex,
 ) ?EnumLiteralContext {
+    const tree = builder.orig_handle.tree;
     const token_tags = tree.tokens.items(.tag);
 
     // Allow using `1.` (parser workaround)
@@ -1067,22 +1110,32 @@ fn getEnumLiteralContext(
     else
         (dot_token_index - 1);
 
-    var dot_context = EnumLiteralContext{ .likely = .enum_literal };
+    var dot_context = EnumLiteralContext.default;
 
     switch (token_tags[token_index]) {
         .equal => {
             token_index -= 1;
             if ((token_tags[token_index] == .r_paren)) return null; // `..) = .`, ie lhs is a fn call
-            dot_context.likely = .enum_assignment;
+            dot_context.likely = .assignment;
             dot_context.identifier_token_index = token_index;
         },
         .equal_equal, .bang_equal => {
             token_index -= 1;
-            dot_context.likely = .enum_comparison;
+            dot_context.likely = .comparison;
+            dot_context.need_ret_type = true; // Ok if lhs is a fn result value
             dot_context.identifier_token_index = token_index;
         },
         .l_brace, .comma, .l_paren => {
-            dot_context = getSwitchOrStructInitContext(tree, dot_token_index) orelse return null;
+            dot_context = getSwitchOrStructInitContext(builder, dot_token_index) orelse return null;
+        },
+        .keyword_return => {
+            const doc_scope = builder.orig_handle.getDocumentScope() catch return null;
+            const fn_scope = Analyser.innermostFunctionScopeAtIndex(doc_scope, tree.tokens.items(.start)[token_index]).unwrap() orelse return null;
+            const fn_node = doc_scope.getScopeAstNode(fn_scope).?;
+            dot_context.need_ret_type = true;
+            // indicate opt ret type should be unwrapped (technically a fn's (enum) result is being assigned (even if `_ = f();`))
+            dot_context.likely = .assignment;
+            dot_context.identifier_token_index = builder.orig_handle.tree.nodes.items(.main_token)[fn_node] + 1;
         },
         else => return null,
     }
@@ -1093,11 +1146,12 @@ fn getEnumLiteralContext(
 /// Returns the token index of the identifier
 /// If the identifier is a `fn_name`, `fn_arg_index` is the index of the fn's param
 fn getSwitchOrStructInitContext(
-    tree: Ast,
+    builder: *Builder,
     dot_index: Ast.TokenIndex,
 ) ?EnumLiteralContext {
     // at least 3 tokens should be present, `x{.`
     if (dot_index < 2) return null;
+    const tree = builder.orig_handle.tree;
     const token_tags = tree.tokens.items(.tag);
     // pedantic check (can be removed if the "generic exit" conditions below are made to cover more/all cases)
     if (token_tags[dot_index] != .period) return null;
@@ -1108,7 +1162,7 @@ fn getSwitchOrStructInitContext(
     // in this case `fn completeDot` would still provide enum completions
     if (token_tags[upper_index] == .equal) return null;
 
-    var likely: EnumLiteralContext.Likely = .struct_field;
+    var likely: EnumLiteralContext.Likely = .field;
 
     var fn_arg_index: usize = 0;
     var need_ret_type: bool = false;
@@ -1135,6 +1189,14 @@ fn getSwitchOrStructInitContext(
                     .period => {
                         if (upper_index < 3) return null;
                         upper_index -= 1;
+                        if (token_tags[upper_index] == .keyword_return) {
+                            const doc_scope = builder.orig_handle.getDocumentScope() catch return null;
+                            const fn_scope = Analyser.innermostFunctionScopeAtIndex(doc_scope, tree.tokens.items(.start)[upper_index]).unwrap() orelse return null;
+                            const fn_node = doc_scope.getScopeAstNode(fn_scope).?;
+                            need_ret_type = true;
+                            upper_index = builder.orig_handle.tree.nodes.items(.main_token)[fn_node] + 1;
+                            break :find_identifier;
+                        }
                         if (token_tags[upper_index] == .ampersand) upper_index -= 1; // `&.{.`
                         if (token_tags[upper_index] == .equal) { // `= .{.`
                             upper_index -= 1; // eat the `=`
@@ -1227,7 +1289,7 @@ fn getSwitchOrStructInitContext(
                     .keyword_addrspace,
                     .keyword_callconv,
                     => {
-                        likely = .enum_arg;
+                        likely = .fn_arg;
                         break :find_identifier;
                     },
                     else => return null,
@@ -1245,7 +1307,7 @@ fn getSwitchOrStructInitContext(
     // FIXME: This creates a 'blind spot' if the first node in a file is a .container_field_init
     if (upper_index == 0) return null;
 
-    return EnumLiteralContext{
+    return .{
         .likely = likely,
         .identifier_token_index = upper_index,
         .fn_arg_index = fn_arg_index,
@@ -1271,7 +1333,7 @@ fn collectContainerFields(
     for (container_decl.ast.members) |member| {
         const field = handle.tree.fullContainerField(member) orelse continue;
         const name = handle.tree.tokenSlice(field.ast.main_token);
-        if (likely != .struct_field and likely != .enum_comparison and likely != .switch_case and !field.ast.tuple_like) {
+        if (!field.ast.tuple_like and likely.requiresDecor(.braces)) {
             try builder.completions.append(builder.arena, .{
                 .label = name,
                 .kind = if (field.ast.tuple_like) .EnumMember else .Field,
@@ -1286,7 +1348,7 @@ fn collectContainerFields(
             .label = name,
             .kind = if (field.ast.tuple_like) .EnumMember else .Field,
             .detail = Analyser.getContainerFieldSignature(handle.tree, field),
-            .insertText = if (field.ast.tuple_like or likely == .enum_comparison or likely == .switch_case)
+            .insertText = if (field.ast.tuple_like or !likely.requiresDecor(.assignment_operator))
                 name
             else
                 try std.fmt.allocPrint(builder.arena, "{s} = ", .{name}),
@@ -1514,7 +1576,7 @@ fn collectVarAccessContainerNodes(
         const fn_proto_node_handle = type_expr.data.other; // this assumes that function types can only be Ast nodes
         const fn_proto_node = fn_proto_node_handle.node;
         const fn_proto_handle = fn_proto_node_handle.handle;
-        if (dot_context.likely == .enum_comparison or dot_context.need_ret_type) { // => we need f()'s return type
+        if (dot_context.need_ret_type) {
             var buf: [1]Ast.Node.Index = undefined;
             const full_fn_proto = fn_proto_handle.tree.fullFnProto(&buf, fn_proto_node).?;
             const has_body = fn_proto_handle.tree.nodes.items(.tag)[fn_proto_node] == .fn_decl;
@@ -1530,6 +1592,9 @@ fn collectVarAccessContainerNodes(
                 else => {},
             }
             if (try analyser.resolveUnwrapErrorUnionType(node_type, .payload)) |unwrapped| node_type = unwrapped;
+            if (dot_context.likely.shouldUnwrapOptional()) {
+                if (try analyser.resolveOptionalUnwrap(node_type)) |unwrapped| node_type = unwrapped;
+            }
             try node_type.getAllTypesWithHandlesArrayList(arena, types_with_handles);
             return;
         }
@@ -1576,8 +1641,7 @@ fn collectFieldAccessContainerNodes(
     const decls = try analyser.getSymbolFieldAccesses(arena, handle, loc.end, loc, name) orelse return;
     for (decls) |decl| {
         var node_type = try decl.resolveType(analyser) orelse continue;
-        // Unwrap `identifier.opt_enum_field = .` or `identifier.opt_cont_field = .{.`
-        if (dot_context.likely == .enum_assignment or dot_context.likely == .struct_field) {
+        if (dot_context.likely.shouldUnwrapOptional()) {
             if (try analyser.resolveOptionalUnwrap(node_type)) |unwrapped| node_type = unwrapped;
         }
         if (node_type.isFunc()) {
@@ -1646,7 +1710,7 @@ fn collectEnumLiteralContainerNodes(
     const arena = builder.arena;
     const alleged_field_name = handle.tree.source[loc.start + 1 .. loc.end];
     const dot_index = offsets.sourceIndexToTokenIndex(handle.tree, loc.start);
-    const el_dot_context = getSwitchOrStructInitContext(handle.tree, dot_index) orelse return;
+    const el_dot_context = getSwitchOrStructInitContext(builder, dot_index) orelse return;
     const containers = try collectContainerNodes(
         builder,
         handle,
