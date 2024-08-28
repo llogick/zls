@@ -2723,6 +2723,13 @@ test "completion - builtin fns taking an enum arg" {
         .expected_replace_line = "test { @atomicRmw(1,2,3,4,.acq_rel",
         .enable_snippets = false,
     });
+    try testCompletionTextEdit(.{
+        .source = "test { @branchHint(.<cursor>",
+        .label = "cold",
+        .expected_insert_line = "test { @branchHint(.cold",
+        .expected_replace_line = "test { @branchHint(.cold",
+        .enable_snippets = false,
+    });
     try testCompletion(
         \\test {
         \\    @call(.<cursor>

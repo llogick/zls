@@ -6,10 +6,10 @@ const builtin = @import("builtin");
 const zls_version = std.SemanticVersion{ .major = 0, .minor = 14, .patch = 0, .pre = "dev" };
 
 /// Specify the minimum Zig version that is required to compile and test ZLS:
-/// std.zig.tokenizer: simplification and spec conformance (#20885)
+/// "Implement `@branchHint` and new `@export` usage" (#21214)
 ///
 /// Must match the `minimum_zig_version` in `build.zig.zon`.
-const minimum_build_zig_version = "0.14.0-dev.1232+61919fe63";
+const minimum_build_zig_version = "0.14.0-dev.1338+93cb44c80";
 
 /// Specify the minimum Zig version that is required to run ZLS:
 /// Release 0.12.0
