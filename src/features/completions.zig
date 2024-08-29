@@ -874,7 +874,7 @@ pub fn completionAtIndex(
 
     switch (pos_context) {
         .builtin => try completeBuiltin(&builder),
-        .var_access, .empty => try completeGlobal(&builder),
+        .var_access, .empty, .parens_expr => try completeGlobal(&builder),
         .field_access => |loc| try completeFieldAccess(&builder, loc),
         .global_error_set => |loc| try completeError(&builder, loc) orelse try globalSetCompletions(&builder, .error_set),
         .enum_literal => |loc| try completeDot(&builder, loc),

@@ -3520,6 +3520,8 @@ pub fn getPositionContext(
                     .enum_literal => curr_ctx.ctx = .{
                         .enum_literal = tokenLocAppend(curr_ctx.ctx.loc().?, tok),
                     },
+                    // `if` or `while` condition w/out braces, e.g. `if (true) std.<cursor>`
+                    .parens_expr => curr_ctx.ctx = .{ .var_access = tok.loc },
                     else => {},
                 },
                 .builtin => curr_ctx.ctx = .{ .builtin = tok.loc },
