@@ -279,6 +279,20 @@ test "var decl" {
     , .{ .kind = .Type });
 }
 
+test "struct field" {
+    try testInlayHints(
+        \\const S<type> = struct {
+        \\    @"n a m e": S,
+        \\    @"struct": S,
+        \\};
+        \\test {
+        // FIXME: Only one level of depth supported
+        //\\    const s: S = .{ .@"struct"<S> = .{ .@"n a m e"<S> = .{}}
+        \\    const s: S = .{ .@"struct"<S> = .{ .@"n a m e" = .{}}}
+        \\}
+    , .{ .kind = .Type });
+}
+
 test "function alias" {
     try testInlayHints(
         \\fn foo(alpha: u32) void {
