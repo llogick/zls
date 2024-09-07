@@ -1416,7 +1416,7 @@ fn collectEnumLiteralContainerNodes(
 ) error{OutOfMemory}!void {
     const analyser = builder.analyser;
     const arena = builder.arena;
-    const alleged_field_name = handle.tree.source[loc.start + 1 .. loc.end];
+    const alleged_field_name = offsets.identifierIndexToNameSlice(handle.tree.source, loc.start + 1);
     const dot_index = offsets.sourceIndexToTokenIndex(handle.tree, loc.start);
     const el_dot_context = getSwitchOrStructInitContext(handle.tree, dot_index) orelse return;
     const containers = try collectContainerNodes(

@@ -1949,7 +1949,7 @@ test "error union" {
     });
 }
 
-test "structinit" {
+test "struct init" {
     try testCompletion(
         \\const S = struct {
         \\    alpha: u32,
@@ -2052,6 +2052,19 @@ test "structinit" {
         .{ .label = "alpha", .kind = .Field, .detail = "*const S" },
         .{ .label = "beta", .kind = .Field, .detail = "u32" },
         .{ .label = "gamma", .kind = .Field, .detail = "?S = null" },
+    });
+    // Fields with the `@"n a m e"` syntax
+    try testCompletion(
+        \\const S = struct {
+        \\    @"n a m e": S,
+        \\    @"struct": S,
+        \\};
+        \\test {
+        \\    const s: S = .{ .@"struct" = .{ .@"n a m e" = .<cursor>}}
+        \\}
+    , &.{
+        .{ .label = "@\"n a m e\"", .kind = .Field, .detail = "S" },
+        .{ .label = "@\"struct\"", .kind = .Field, .detail = "S" },
     });
     try testCompletion(
         \\const S = struct { alpha: u32 };
