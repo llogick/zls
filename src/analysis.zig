@@ -3339,7 +3339,7 @@ pub fn isSymbolChar(char: u8) bool {
 /// comments, etc) lexing just a single line is always correct.
 pub fn getPositionContext(
     allocator: std.mem.Allocator,
-    text: []const u8,
+    tree: Ast,
     doc_index: usize,
     /// Should we look to the end of the current context? Yes for goto def, no for completions
     lookahead: bool,
@@ -3348,34 +3348,62 @@ pub fn getPositionContext(
     defer tracy_zone.end();
 
     var new_index = doc_index;
-    if (lookahead) {
-        // looking for possible end of char literal
-        if (std.mem.indexOf(u8, text[doc_index..@min(doc_index + 2, text.len)], &.{'\''})) |char_index| {
-            if (text[new_index + char_index - 1] == '\\') {
-                // handles escaped single quotes '\''
-                new_index = @min(new_index + char_index + 2, text.len - 1);
-            } else {
-                new_index += char_index + 1;
-            }
-        } else if (new_index + 2 < text.len) {
-            if (text[new_index] == '@') new_index += 2;
-            while (new_index < text.len and isSymbolChar(text[new_index])) : (new_index += 1) {}
-            if (new_index < text.len) {
-                switch (text[new_index]) {
-                    ':' => { // look for `id:`, but avoid `a: T` by checking for a `{` following the ':'
-                        var b_index = new_index + 1;
-                        while (b_index < text.len and text[b_index] == ' ') : (b_index += 1) {} // eat spaces
-                        if (text[b_index] == '{') new_index += 1; // current new_index points to ':', but slc ends are exclusive => `text[0..pos_of_r_brace]`
-                    },
-                    // ';' => new_index += 1, // XXX: currently given `some;` the last letter gets cut off, ie `som`, but fixing it breaks existing logic.. ?
-                    else => {},
+    const text = tree.source;
+    const token_tags = tree.tokens.items(.tag);
+    if (lookahead) blk: {
+        // maybe in the middle of a `@"n a m e"`
+        if (text[new_index] == ' ') {
+            var maybe_ident_tok_i = offsets.sourceIndexToTokenIndex(tree, new_index);
+            if (switch (token_tags[maybe_ident_tok_i]) {
+                .identifier, .builtin, .string_literal => true,
+                else => false,
+            }) {
+                // `blk: {` or 'v: T'?
+                if (maybe_ident_tok_i < token_tags.len - 2 and token_tags[maybe_ident_tok_i + 1] == .colon) {
+                    if (token_tags[maybe_ident_tok_i + 2] == .l_brace) maybe_ident_tok_i += 1;
                 }
+                new_index = offsets.tokenToLoc(tree, maybe_ident_tok_i).end;
+                break :blk;
             }
+            // find the next non space char
+            while (new_index < text.len and text[new_index] == ' ') : (new_index += 1) {}
+            maybe_ident_tok_i = offsets.sourceIndexToTokenIndex(tree, new_index);
+            // pre-label?
+            if (token_tags[maybe_ident_tok_i] == .colon) maybe_ident_tok_i += 1;
+            if (switch (token_tags[maybe_ident_tok_i]) {
+                .identifier, .builtin, .string_literal => true,
+                else => false,
+            }) {
+                // `blk: {` or 'v: T'?
+                if (maybe_ident_tok_i < token_tags.len - 2 and token_tags[maybe_ident_tok_i + 1] == .colon) {
+                    if (token_tags[maybe_ident_tok_i + 2] == .l_brace) maybe_ident_tok_i += 1;
+                }
+                new_index = offsets.tokenToLoc(tree, maybe_ident_tok_i).end;
+                break :blk;
+            }
+            break :blk;
+        }
+        var maybe_ident_tok_i = offsets.sourceIndexToTokenIndex(tree, new_index);
+        // pre-label?
+        if (token_tags[maybe_ident_tok_i] == .colon and (maybe_ident_tok_i < token_tags.len - 1) and token_tags[maybe_ident_tok_i + 1] == .l_brace) {
+            new_index = offsets.tokenToLoc(tree, maybe_ident_tok_i).end;
+            break :blk;
+        }
+        if (switch (token_tags[maybe_ident_tok_i]) {
+            .identifier, .builtin, .string_literal => true,
+            else => false,
+        }) {
+            // `blk: {` or 'v: T'?
+            if (maybe_ident_tok_i < token_tags.len - 2 and token_tags[maybe_ident_tok_i + 1] == .colon) {
+                if (token_tags[maybe_ident_tok_i + 2] == .l_brace) maybe_ident_tok_i += 1;
+            }
+            new_index = offsets.tokenToLoc(tree, maybe_ident_tok_i).end;
+            break :blk;
         }
     }
 
     const prev_char = if (new_index > 0) text[new_index - 1] else 0;
-    var line_loc = if (!lookahead) offsets.lineLocAtIndex(text, new_index) else offsets.lineLocUntilIndex(text, new_index);
+    var line_loc = if (lookahead) offsets.lineLocAtIndex(text, new_index) else offsets.lineLocUntilIndex(text, new_index);
     const line = offsets.locToSlice(text, line_loc);
 
     if (std.mem.startsWith(u8, std.mem.trimLeft(u8, line, " \t"), "//")) return .comment;

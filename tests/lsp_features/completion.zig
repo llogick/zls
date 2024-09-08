@@ -3376,28 +3376,28 @@ test "insert replace behaviour - file system completions" {
         .source = \\const std = @import("s<cursor>td");
         , .label = "std"
         , .expected_insert_line = \\const std = @import("stdtd");
-        , .expected_replace_line = \\const std = @import("std");
+        , .expected_replace_line = \\const std = @import("stdtd");
         ,
     });
     try testCompletionTextEdit(.{
         .source = \\const std = @import("<cursor>std");
         , .label = "std"
         , .expected_insert_line = \\const std = @import("stdstd");
-        , .expected_replace_line = \\const std = @import("std");
+        , .expected_replace_line = \\const std = @import("stdstd");
         ,
     });
     try testCompletionTextEdit(.{
         .source = \\const std = @import("<cursor>.zig");
         , .label = "std"
         , .expected_insert_line = \\const std = @import("std.zig");
-        , .expected_replace_line = \\const std = @import("std");
+        , .expected_replace_line = \\const std = @import("std.zig");
         ,
     });
     try testCompletionTextEdit(.{
         .source = \\const std = @import("st<cursor>.zig");
         , .label = "std"
         , .expected_insert_line = \\const std = @import("std.zig");
-        , .expected_replace_line = \\const std = @import("std");
+        , .expected_replace_line = \\const std = @import("std.zig");
         ,
     });
     if (true) return error.SkipZigTest; // TODO

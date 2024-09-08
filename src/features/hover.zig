@@ -454,7 +454,7 @@ pub fn hover(
     markup_kind: types.MarkupKind,
     offset_encoding: offsets.Encoding,
 ) !?types.Hover {
-    const pos_context = try Analyser.getPositionContext(arena, handle.tree.source, source_index, true);
+    const pos_context = try Analyser.getPositionContext(arena, handle.tree, source_index, true);
 
     const response = switch (pos_context) {
         .builtin => try hoverDefinitionBuiltin(analyser, arena, handle, source_index, markup_kind, offset_encoding),
