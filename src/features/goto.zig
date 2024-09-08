@@ -263,7 +263,7 @@ pub fn gotoHandler(
     );
     defer analyser.deinit();
 
-    const pos_context = try Analyser.getPositionContext(arena, handle.tree.source, source_index, true);
+    const pos_context = try Analyser.getPositionContext(arena, handle.tree, source_index, true);
 
     const response = switch (pos_context) {
         .builtin => |loc| try gotoDefinitionBuiltin(&server.document_store, handle, loc, server.offset_encoding),

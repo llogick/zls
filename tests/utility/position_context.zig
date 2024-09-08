@@ -9,10 +9,11 @@ const allocator = std.testing.allocator;
 
 test "var access" {
     try testContext(
+        // lookahead == true
         \\const a_var =<cursor> identifier;
     ,
-        .empty,
-        null,
+        .var_access,
+        "identifier",
     );
     try testContext(
         \\const a_var = <cursor>identifier;
@@ -185,13 +186,13 @@ test "field access" {
         \\if (bar.<cursor>@"field" == foo) {
     ,
         .field_access,
-        "bar.@\"field",
+        "bar.@\"field\"",
     );
     try testContext(
         \\if (bar.@"fie<cursor>ld" == foo) {
     ,
         .field_access,
-        "bar.@\"field",
+        "bar.@\"field\"",
     );
     try testContext(
         \\if (bar.@"field"<cursor> == foo) {
@@ -385,25 +386,25 @@ test "import/embedfile string literal" {
         \\const std = @import("s<cursor>t");
     ,
         .import_string_literal,
-        "\"st", // maybe report just "st"
+        "\"st\"",
     );
     try testContext(
         \\const std = @import("st<cursor>");
     ,
         .import_string_literal,
-        "\"st", // maybe report just "st"
+        "\"st\"",
     );
     try testContext(
         \\const std = @embedFile("file.<cursor>");
     ,
         .embedfile_string_literal,
-        "\"file.", // maybe report just "file."
+        "\"file.\"",
     );
     try testContext(
         \\const std = @embedFile("file<cursor>.");
     ,
         .embedfile_string_literal,
-        "\"file", // maybe report just "file."
+        "\"file.\"",
     );
 }
 
@@ -412,13 +413,13 @@ test "string literal" {
         \\var foo = "he<cursor>llo world!";
     ,
         .string_literal,
-        "\"hello",
+        "\"hello world!\"",
     );
     try testContext(
         \\var foo = \\hell<cursor>o;
     ,
         .string_literal,
-        "\\\\hell", // XXX: where's the 'o'?
+        "\\\\hello;",
     );
 }
 
@@ -430,25 +431,25 @@ test "global error set" {
         "error",
     );
     try testContext(
-        \\fn foo() erro<cursor>r!void {
+        \\fn foo() erro<cursor>r!void {}
     ,
         .global_error_set,
         "error",
     );
     try testContext(
-        \\fn foo() error<cursor>!void {
+        \\fn foo() error<cursor>!void {}
     ,
         .global_error_set,
         "error",
     );
     try testContext(
-        \\fn foo() error<cursor>.!void {
+        \\fn foo() error<cursor>.!void {}
     ,
         .global_error_set,
         "error",
     );
     try testContext(
-        \\fn foo() error.<cursor>!void {
+        \\fn foo() error.<cursor>!void {}
     ,
         .global_error_set,
         "error",
@@ -480,7 +481,7 @@ test "enum literal" {
         \\var foo = .ta<cursor>g;
     ,
         .enum_literal,
-        ".ta",
+        ".tag",
     );
     try testContext(
         \\var foo = .tag<cursor>;
@@ -568,12 +569,16 @@ test "empty" {
     );
 }
 
+const Ast = std.zig.Ast;
+
 fn testContext(line: []const u8, tag: std.meta.Tag(Analyser.PositionContext), maybe_range: ?[]const u8) !void {
     const cursor_idx = std.mem.indexOf(u8, line, "<cursor>").?;
-    const final_line = try std.mem.concat(allocator, u8, &.{ line[0..cursor_idx], line[cursor_idx + "<cursor>".len ..] });
+    const final_line = try std.mem.concatWithSentinel(allocator, u8, &.{ line[0..cursor_idx], line[cursor_idx + "<cursor>".len ..] }, 0);
     defer allocator.free(final_line);
+    var tree = try Ast.parse(allocator, final_line, .zig);
+    defer tree.deinit(allocator);
 
-    const ctx = try Analyser.getPositionContext(allocator, final_line, cursor_idx, true);
+    const ctx = try Analyser.getPositionContext(allocator, tree, cursor_idx, true);
 
     if (std.meta.activeTag(ctx) != tag) {
         std.debug.print("Expected tag `{s}`, got `{s}`\n", .{ @tagName(tag), @tagName(std.meta.activeTag(ctx)) });

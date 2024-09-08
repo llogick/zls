@@ -640,7 +640,7 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
         .cinclude_string_literal,
         .embedfile_string_literal,
         .string_literal,
-        => |loc| .{ .start = loc.start + 1, .end = loc.end - 1 },
+        => |loc| .{ .start = loc.start + 1, .end = loc.end},
         else => unreachable,
     };
 
@@ -870,8 +870,8 @@ pub fn completionAtIndex(
         return .{ .isIncomplete = false, .items = builder.completions.items };
     }
 
-    const pos_context = try Analyser.getPositionContext(arena, source, source_index, false);
-
+    const pos_context = try Analyser.getPositionContext(arena, handle.tree, source_index, false);
+    
     switch (pos_context) {
         .builtin => try completeBuiltin(&builder),
         .var_access, .empty, .parens_expr => try completeGlobal(&builder),
@@ -1432,7 +1432,7 @@ fn collectContainerNodes(
     defer tracy_zone.end();
 
     var types_with_handles = std.ArrayListUnmanaged(Analyser.Type){};
-    const position_context = try Analyser.getPositionContext(builder.arena, handle.tree.source, source_index, false);
+    const position_context = try Analyser.getPositionContext(builder.arena, handle.tree, source_index, false);
     switch (position_context) {
         .var_access => |loc| try collectVarAccessContainerNodes(builder, handle, loc, dot_context, &types_with_handles),
         .field_access => |loc| try collectFieldAccessContainerNodes(builder, handle, loc, dot_context, &types_with_handles),
