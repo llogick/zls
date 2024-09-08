@@ -323,6 +323,7 @@ fn hoverDefinitionEnumLiteral(
     defer tracy_zone.end();
 
     const name_tok = offsets.sourceIndexToTokenIndex(handle.tree, source_index);
+    if (handle.tree.tokens.items(.tag)[name_tok] != .identifier) return null;
     const name_loc = offsets.identifierTokenToNameLoc(handle.tree, name_tok);
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     const decl = (try analyser.getSymbolEnumLiteral(arena, handle, name_loc.start, name)) orelse return null;
