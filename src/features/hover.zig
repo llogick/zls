@@ -294,7 +294,9 @@ fn hoverDefinitionGlobal(
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
-    const name_loc = Analyser.identifierLocFromIndex(handle.tree, pos_index) orelse return null;
+    const name_tok = offsets.sourceIndexToTokenIndex(handle.tree, pos_index);
+    if (handle.tree.tokens.items(.tag)[name_tok] != .identifier) return null;
+    const name_loc = offsets.identifierTokenToNameLoc(handle.tree, name_tok);
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     const decl = (try analyser.lookupSymbolGlobal(handle, name, pos_index)) orelse return null;
 
@@ -320,9 +322,10 @@ fn hoverDefinitionEnumLiteral(
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
-    const name_loc = Analyser.identifierLocFromIndex(handle.tree, source_index) orelse return null;
+    const name_tok = offsets.sourceIndexToTokenIndex(handle.tree, source_index);
+    const name_loc = offsets.identifierTokenToNameLoc(handle.tree, name_tok);
     const name = offsets.locToSlice(handle.tree.source, name_loc);
-    const decl = (try analyser.getSymbolEnumLiteral(arena, handle, source_index, name)) orelse return null;
+    const decl = (try analyser.getSymbolEnumLiteral(arena, handle, name_loc.start, name)) orelse return null;
 
     return .{
         .contents = .{
