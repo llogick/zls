@@ -700,7 +700,7 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
         .cinclude_string_literal,
         .embedfile_string_literal,
         .string_literal,
-        => |loc| .{ .start = loc.start + 1, .end = loc.end},
+        => |loc| .{ .start = loc.start + 1, .end = loc.end },
         else => unreachable,
     };
 
@@ -873,7 +873,7 @@ pub fn completionAtIndex(
     }
 
     const pos_context = try Analyser.getPositionContext(arena, handle.tree, source_index, false);
-    
+
     switch (pos_context) {
         .builtin => try completeBuiltin(&builder),
         .var_access, .empty => try completeGlobal(&builder),
@@ -1297,7 +1297,8 @@ fn collectVarAccessContainerNodes(
     const analyser = builder.analyser;
     const arena = builder.arena;
 
-    const symbol_decl = try analyser.lookupSymbolGlobal(handle, handle.tree.source[loc.start..loc.end], loc.end) orelse return;
+    const name = if (handle.tree.source[loc.start] == '@' and handle.tree.source[loc.end - 1] == '"') handle.tree.source[loc.start + 2 .. loc.end - 1] else handle.tree.source[loc.start..loc.end];
+    const symbol_decl = try analyser.lookupSymbolGlobal(handle, name, loc.end) orelse return;
     const result = try symbol_decl.resolveType(analyser) orelse return;
     const type_expr = try analyser.resolveDerefType(result) orelse result;
     if (type_expr.isFunc()) {
