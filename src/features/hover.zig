@@ -351,7 +351,9 @@ fn hoverDefinitionFieldAccess(
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
-    const name_loc = Analyser.identifierLocFromIndex(handle.tree, source_index) orelse return null;
+    const name_tok = offsets.sourceIndexToTokenIndex(handle.tree, source_index);
+    if (handle.tree.tokens.items(.tag)[name_tok] != .identifier) return null;
+    const name_loc = offsets.identifierTokenToNameLoc(handle.tree, name_tok);
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     const held_loc = offsets.locMerge(loc, name_loc);
     const decls = (try analyser.getSymbolFieldAccesses(arena, handle, source_index, held_loc, name)) orelse return null;
