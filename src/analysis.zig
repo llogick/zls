@@ -3551,7 +3551,11 @@ pub fn getPositionContext(
                     curr_ctx.ctx = .{ .string_literal = tok.loc };
                 },
                 .identifier => switch (curr_ctx.ctx) {
-                    .empty, .pre_label, .var_access => curr_ctx.ctx = .{ .var_access = tok.loc },
+                    .empty,
+                    .pre_label,
+                    .var_access,
+                    .parens_expr, // `if` or `while` condition w/out braces, e.g. `if (true) std.<cursor>`
+                    => curr_ctx.ctx = .{ .var_access = tok.loc },
                     .label => |filled| if (!filled) {
                         curr_ctx.ctx = .{ .label = true };
                     } else {
@@ -3560,8 +3564,6 @@ pub fn getPositionContext(
                     .enum_literal => curr_ctx.ctx = .{
                         .enum_literal = tokenLocAppend(curr_ctx.ctx.loc().?, tok),
                     },
-                    // `if` or `while` condition w/out braces, e.g. `if (true) std.<cursor>`
-                    .parens_expr => curr_ctx.ctx = .{ .var_access = tok.loc },
                     else => {},
                 },
                 .builtin => curr_ctx.ctx = .{ .builtin = tok.loc },
@@ -3635,7 +3637,6 @@ pub fn getPositionContext(
 
     if (stack.popOrNull()) |state| {
         switch (state.ctx) {
-            .empty => {},
             .label => |filled| {
                 // We need to check this because the state could be a filled
                 // label if only a space follows it
@@ -3643,23 +3644,12 @@ pub fn getPositionContext(
                     return state.ctx;
                 }
             },
+            .parens_expr => {},
             else => return state.ctx,
         }
     }
 
-    if (line.len == 0) return .empty;
-
-    const held_line = try allocator.dupeZ(u8, offsets.locToSlice(text, line_loc));
-    defer allocator.free(held_line);
-
-    switch (line[0]) {
-        'a'...'z', 'A'...'Z', '_', '@' => {},
-        else => return .empty,
-    }
-    var tokenizer = std.zig.Tokenizer.init(held_line);
-    const tok = tokenizer.next();
-
-    return if (tok.tag == .identifier) PositionContext{ .var_access = tok.loc } else .empty;
+    return .empty;
 }
 
 pub const TokenWithHandle = struct {
