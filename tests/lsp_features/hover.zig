@@ -234,7 +234,6 @@ test "string literal" {
         \\```zig
         \\const foo =
         \\    \\ipsum lorem
-        \\
         \\```
         \\```zig
         \\(*const [11:0]u8)
@@ -250,7 +249,6 @@ test "string literal" {
         \\const foo =
         \\    \\ipsum lorem
         \\    \\dolor sit amet
-        \\
         \\```
         \\```zig
         \\(*const [26:0]u8)
