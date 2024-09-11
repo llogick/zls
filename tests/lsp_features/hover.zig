@@ -90,6 +90,16 @@ test "literal" {
         \\(void)
         \\```
     );
+    try testHover(
+        \\const @"f <cursor> o o" = {};
+    ,
+        \\```zig
+        \\const @"f  o o" = {}
+        \\```
+        \\```zig
+        \\(void)
+        \\```
+    );
 }
 
 test "char literal" {
@@ -406,6 +416,20 @@ test "struct" {
         \\```
         \\```zig
         \\(type)
+        \\```
+    );
+    try testHover(
+        \\const @"struct" = struct { @"f i e l d": bool };
+        \\test {
+        \\    const s: @"struct" = .{};
+        \\    s.@"f i<cursor> e l d" = true;
+        \\}
+    ,
+        \\```zig
+        \\bool
+        \\```
+        \\```zig
+        \\(bool)
         \\```
     );
 }
