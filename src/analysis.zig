@@ -3397,7 +3397,10 @@ pub fn getPositionContext(
             }) {
                 // `blk: {` or 'v: T'?
                 if (maybe_ident_tok_i < token_tags.len - 2 and token_tags[maybe_ident_tok_i + 1] == .colon) {
-                    if (token_tags[maybe_ident_tok_i + 2] == .l_brace) maybe_ident_tok_i += 1;
+                    switch (token_tags[maybe_ident_tok_i + 2]) {
+                        .l_brace, .keyword_switch => maybe_ident_tok_i += 1,
+                        else => {},
+                    }
                 }
                 new_index = offsets.tokenToLoc(tree, maybe_ident_tok_i).end;
                 break :blk;
@@ -3413,7 +3416,10 @@ pub fn getPositionContext(
             }) {
                 // `blk: {` or 'v: T'?
                 if (maybe_ident_tok_i < token_tags.len - 2 and token_tags[maybe_ident_tok_i + 1] == .colon) {
-                    if (token_tags[maybe_ident_tok_i + 2] == .l_brace) maybe_ident_tok_i += 1;
+                    switch (token_tags[maybe_ident_tok_i + 2]) {
+                        .l_brace, .keyword_switch => maybe_ident_tok_i += 1,
+                        else => {},
+                    }
                 }
                 new_index = offsets.tokenToLoc(tree, maybe_ident_tok_i).end;
                 break :blk;
@@ -3422,9 +3428,14 @@ pub fn getPositionContext(
         }
         var maybe_ident_tok_i = offsets.sourceIndexToTokenIndex(tree, new_index);
         // pre-label?
-        if (token_tags[maybe_ident_tok_i] == .colon and (maybe_ident_tok_i < token_tags.len - 1) and token_tags[maybe_ident_tok_i + 1] == .l_brace) {
-            new_index = offsets.tokenToLoc(tree, maybe_ident_tok_i).end;
-            break :blk;
+        if (token_tags[maybe_ident_tok_i] == .colon and (maybe_ident_tok_i < token_tags.len - 1)) {
+            switch (token_tags[maybe_ident_tok_i + 1]) {
+                .l_brace, .keyword_switch => {
+                    new_index = offsets.tokenToLoc(tree, maybe_ident_tok_i).end;
+                    break :blk;
+                },
+                else => {},
+            }
         }
         if (switch (token_tags[maybe_ident_tok_i]) {
             .identifier, .builtin, .string_literal => true,
@@ -3432,7 +3443,10 @@ pub fn getPositionContext(
         }) {
             // `blk: {` or 'v: T'?
             if (maybe_ident_tok_i < token_tags.len - 2 and token_tags[maybe_ident_tok_i + 1] == .colon) {
-                if (token_tags[maybe_ident_tok_i + 2] == .l_brace) maybe_ident_tok_i += 1;
+                switch (token_tags[maybe_ident_tok_i + 2]) {
+                    .l_brace, .keyword_switch => maybe_ident_tok_i += 1,
+                    else => {},
+                }
             }
             new_index = offsets.tokenToLoc(tree, maybe_ident_tok_i).end;
             break :blk;

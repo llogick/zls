@@ -681,6 +681,7 @@ fn walkNode(
         .test_decl,
         .@"defer",
         .@"break",
+        .@"continue",
         .anyframe_type,
         => walkRhsNode(context, tree, node_idx),
 
@@ -793,7 +794,6 @@ fn walkNode(
         .asm_input,
         => unreachable,
 
-        .@"continue",
         .anyframe_literal,
         .char_literal,
         .number_literal,
@@ -1276,6 +1276,25 @@ noinline fn walkSwitchNode(
     const token_tags = tree.tokens.items(.tag);
     const data = tree.nodes.items(.data);
 
+    const maybe_labeled_switch_scope = labeled: {
+        const first_token = tree.nodes.items(.main_token)[node_idx];
+        if (token_tags[first_token] == .identifier) {
+            const new_scope = try context.startScope(
+                .other,
+                undefined,
+                locToSmallLoc(offsets.tokensToLoc(tree, first_token, ast.lastToken(tree, node_idx))),
+            );
+            try new_scope.pushDeclaration(
+                first_token,
+                .{ .label = .{ .identifier = first_token, .block = node_idx } },
+                .label,
+            );
+            break :labeled new_scope;
+        } else {
+            break :labeled null;
+        }
+    };
+
     try walkNode(context, tree, data[node_idx].lhs);
 
     const extra = tree.extraData(data[node_idx].rhs, Ast.Node.SubRange);
@@ -1298,6 +1317,8 @@ noinline fn walkSwitchNode(
             try walkNode(context, tree, switch_case.ast.target_expr);
         }
     }
+
+    if (maybe_labeled_switch_scope) |scope| try scope.finalize();
 }
 
 noinline fn walkErrdeferNode(
