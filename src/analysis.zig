@@ -4447,10 +4447,14 @@ pub fn lookupSymbolFieldInit(
         else => return null,
     };
 
-    return analyser.lookupSymbolContainer(
+    return try analyser.lookupSymbolContainer(
         container_scope_handle,
         field_name,
         .field,
+    ) orelse try analyser.lookupSymbolContainer(
+        container_scope_handle,
+        field_name,
+        .other,
     );
 }
 
@@ -4636,6 +4640,22 @@ pub fn resolveExpressionTypeFromAncestors(
         .async_call_one,
         .async_call_one_comma,
         => {
+            if (node_tags[node] == .enum_literal and ancestors.len > 1) {
+                const node_slice = offsets.nodeToSlice(tree, node);
+                for (1..ancestors.len) |index| {
+                    const var_decl = tree.fullVarDecl(ancestors[index]) orelse continue;
+                    const init_node_slice = offsets.nodeToSlice(tree, var_decl.ast.init_node);
+                    const dot_index: usize = if (std.mem.startsWith(u8, init_node_slice, "try ")) 4 else 0;
+                    if (std.mem.indexOf(u8, init_node_slice, "(")) |l_paren_index| {
+                        if (std.mem.eql(u8, node_slice, init_node_slice[dot_index..l_paren_index])) {
+                            return try analyser.resolveTypeOfNode(.{
+                                .node = ancestors[index],
+                                .handle = handle,
+                            });
+                        }
+                    }
+                }
+            }
             var buffer: [1]Ast.Node.Index = undefined;
             const call = tree.fullCall(&buffer, ancestors[0]).?;
             const arg_index = std.mem.indexOfScalar(Ast.Node.Index, call.ast.params, node) orelse return null;
