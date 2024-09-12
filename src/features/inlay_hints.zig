@@ -567,6 +567,30 @@ fn writeNodeInlayHint(
                 );
             }
         },
+        .field_access => {
+            const last_tok = tree.lastToken(node);
+            if (!(last_tok < token_tags.len - 1)) return;
+            switch (token_tags[last_tok + 1]) {
+                .equal,
+                // .equal_equal,
+                // .bang_equal,
+                => {},
+                else => return,
+            }
+            const decl = Analyser.DeclWithHandle{ .decl = .{ .ast_node = node }, .handle = builder.handle };
+            const ty = try decl.resolveType(builder.analyser) orelse return;
+            const type_str: []const u8 = try std.fmt.allocPrint(
+                builder.arena,
+                "{}",
+                .{ty.fmt(builder.analyser, .{ .truncate_container_decls = true })},
+            );
+            if (type_str.len != 0)
+                try appendTypeHintString(
+                    builder,
+                    last_tok,
+                    type_str,
+                );
+        },
         else => {},
     }
 }
