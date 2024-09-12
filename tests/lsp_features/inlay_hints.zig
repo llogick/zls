@@ -513,9 +513,7 @@ test "struct field" {
         \\    @"struct": S,
         \\};
         \\test {
-        // FIXME: Only one level of depth supported
-        //\\    const s: S = .{ .@"struct"<S> = .{ .@"n a m e"<S> = .{}}
-        \\    const s: S = .{ .@"struct"<S> = .{ .@"n a m e" = .{}}}
+        \\    const s: S = .{ .@"struct"<S> = .{ .@"n a m e"<S> = .{}}}
         \\}
     , .{ .kind = .Type });
 }
