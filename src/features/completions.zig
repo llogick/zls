@@ -1054,6 +1054,8 @@ const EnumLiteralContext = struct {
         field,
         switch_case,
         err_switch_case,
+        /// `const v: T = try .`
+        trycall_decl_literal,
         // TODO Abort, don't list any enums
         //  - lhs of `=` is a fn call
         //  - able to resolve the type of a switch condition, but it is a struct
@@ -1065,6 +1067,7 @@ const EnumLiteralContext = struct {
             return switch (self.*) {
                 .assignment, // eg `maybe_enum_val: ?Enum = .` or `some.opt_enum_type_field = .` or `fn f() ?T {return .}`
                 .field, // eg `some.opt_type_container_field = .{.`
+                .trycall_decl_literal,
                 => true,
                 else => false,
             };
@@ -1076,12 +1079,14 @@ const EnumLiteralContext = struct {
                     .field,
                     .comparison,
                     .switch_case,
+                    .trycall_decl_literal,
                     => false,
                     else => true,
                 },
                 .assignment_operator => switch (self.*) {
                     .comparison,
                     .switch_case,
+                    .trycall_decl_literal,
                     => false,
                     else => true,
                 },
@@ -1115,7 +1120,7 @@ fn getEnumLiteralContext(
     switch (token_tags[token_index]) {
         .equal => {
             token_index -= 1;
-            if ((token_tags[token_index] == .r_paren)) return null; // `..) = .`, ie lhs is a fn call
+            // if ((token_tags[token_index] == .r_paren)) return null; // `..) = .`, ie lhs is a fn call
             dot_context.likely = .assignment;
             dot_context.identifier_token_index = token_index;
         },
@@ -1136,6 +1141,12 @@ fn getEnumLiteralContext(
             // indicate opt ret type should be unwrapped (technically a fn's (enum) result is being assigned (even if `_ = f();`))
             dot_context.likely = .assignment;
             dot_context.identifier_token_index = builder.orig_handle.tree.nodes.items(.main_token)[fn_node] + 1;
+        },
+        .keyword_try => { // `const v: T = try .`
+            token_index -= 1;
+            if (token_tags[token_index] != .equal) return null;
+            dot_context.likely = .trycall_decl_literal;
+            dot_context.identifier_token_index = token_index - 1;
         },
         else => return null,
     }
@@ -1322,37 +1333,75 @@ fn collectContainerFields(
     container: Analyser.Type,
 ) error{OutOfMemory}!void {
     const use_snippets = builder.server.config.enable_snippets and builder.server.client_capabilities.supports_snippets;
-    const scope_handle = switch (container.data) {
+    const container_scope = switch (container.data) {
         .container => |s| s,
         else => return,
     };
-    const node = scope_handle.toNode();
-    const handle = scope_handle.handle;
-    var buffer: [2]Ast.Node.Index = undefined;
-    const container_decl = Ast.fullContainerDecl(handle.tree, &buffer, node) orelse return;
+    const node = container_scope.toNode();
+    const handle = container_scope.handle;
+    var buffer1: [1]Ast.Node.Index = undefined;
+    var buffer2: [2]Ast.Node.Index = undefined;
+    const container_decl = Ast.fullContainerDecl(handle.tree, &buffer2, node) orelse return;
     for (container_decl.ast.members) |member| {
-        const field = handle.tree.fullContainerField(member) orelse continue;
-        const name = handle.tree.tokenSlice(field.ast.main_token);
-        if (!field.ast.tuple_like and likely.requiresDecor(.braces)) {
-            try builder.completions.append(builder.arena, .{
+        if (handle.tree.fullContainerField(member)) |field| {
+            if (likely == .trycall_decl_literal) continue;
+            const name = handle.tree.tokenSlice(field.ast.main_token);
+            if (!field.ast.tuple_like and likely.requiresDecor(.braces)) {
+                try builder.completions.append(builder.arena, .{
+                    .label = name,
+                    .kind = if (field.ast.tuple_like) .EnumMember else .Field,
+                    .detail = Analyser.getContainerFieldSignature(handle.tree, field),
+                    .insertText = if (use_snippets)
+                        try std.fmt.allocPrint(builder.arena, "{{ .{s} = $1 }}$0", .{name})
+                    else
+                        try std.fmt.allocPrint(builder.arena, "{{ .{s} = ", .{name}),
+                    .insertTextFormat = if (use_snippets) .Snippet else .PlainText,
+                });
+            } else try builder.completions.append(builder.arena, .{
                 .label = name,
                 .kind = if (field.ast.tuple_like) .EnumMember else .Field,
                 .detail = Analyser.getContainerFieldSignature(handle.tree, field),
-                .insertText = if (use_snippets)
-                    try std.fmt.allocPrint(builder.arena, "{{ .{s} = $1 }}$0", .{name})
+                .insertText = if (field.ast.tuple_like or !likely.requiresDecor(.assignment_operator))
+                    name
                 else
-                    try std.fmt.allocPrint(builder.arena, "{{ .{s} = ", .{name}),
-                .insertTextFormat = if (use_snippets) .Snippet else .PlainText,
+                    try std.fmt.allocPrint(builder.arena, "{s} = ", .{name}),
             });
-        } else try builder.completions.append(builder.arena, .{
-            .label = name,
-            .kind = if (field.ast.tuple_like) .EnumMember else .Field,
-            .detail = Analyser.getContainerFieldSignature(handle.tree, field),
-            .insertText = if (field.ast.tuple_like or !likely.requiresDecor(.assignment_operator))
-                name
-            else
-                try std.fmt.allocPrint(builder.arena, "{s} = ", .{name}),
-        });
+        } else if (handle.tree.fullVarDecl(member)) |full_var_decl| {
+            if (likely == .trycall_decl_literal) continue;
+            const resolved_var_ty =
+                try builder.analyser.resolveTypeOfNode(.{
+                .handle = handle,
+                .node = full_var_decl.ast.type_node,
+            }) orelse continue;
+            if (resolved_var_ty.data != .container) continue;
+            if (resolved_var_ty.data.container.handle != handle and
+                resolved_var_ty.data.container.scope != container_scope.scope) continue;
+            const name = handle.tree.tokenSlice(full_var_decl.ast.mut_token + 1);
+            try builder.completions.append(builder.arena, .{
+                .label = name,
+                .kind = .Constant,
+                .detail = Analyser.getVariableSignature(builder.arena, handle.tree, full_var_decl, false) catch null,
+                .insertText = name,
+                .insertTextFormat = .PlainText,
+            });
+        } else if (handle.tree.fullFnProto(&buffer1, member)) |full_fn_proto| {
+            const func_ty: Analyser.Type = .typeVal(.{ .handle = handle, .node = member });
+            const has_self_param = try builder.analyser.firstParamIs(func_ty, .{
+                .data = .{
+                    .container = container_scope,
+                },
+                .is_type_val = true,
+            });
+            if (has_self_param) continue;
+            const ret_ty = try builder.analyser.resolveReturnType(full_fn_proto, handle, null) orelse continue;
+            if (likely == .trycall_decl_literal and ret_ty.data != .error_union) continue;
+            const resolved_ret_ty = try builder.analyser.resolveUnwrapErrorUnionType(ret_ty, .payload) orelse ret_ty;
+            if (resolved_ret_ty.data != .container) continue;
+            if (resolved_ret_ty.data.container.handle != container_scope.handle and
+                resolved_ret_ty.data.container.scope != container_scope.scope) continue;
+            const name = handle.tree.tokenSlice(full_fn_proto.name_token orelse continue);
+            if (try functionTypeCompletion(builder, name, container, func_ty)) |completion| try builder.completions.append(builder.arena, completion);
+        }
     }
 }
 
