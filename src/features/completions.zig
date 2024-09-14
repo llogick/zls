@@ -1092,6 +1092,16 @@ const EnumLiteralContext = struct {
                 },
             };
         }
+        pub fn omitDecl(self: *const @This()) bool {
+            return switch (self.*) {
+                .field,
+                .comparison,
+                .switch_case,
+                .trycall_decl_literal,
+                => true,
+                else => false,
+            };
+        }
     };
 
     const default: @This() = .{
@@ -1214,6 +1224,7 @@ fn getSwitchOrStructInitContext(
                             switch (token_tags[upper_index]) {
                                 .identifier, // `const s: S = .{.`, `S{.name = .`
                                 .period_asterisk, //  `s.* = .{.`
+                                .r_paren, // allow `const v: @This() = .{.}`
                                 => break :find_identifier,
                                 else => return null,
                             }
@@ -1367,7 +1378,7 @@ fn collectContainerFields(
                     try std.fmt.allocPrint(builder.arena, "{s} = ", .{name}),
             });
         } else if (handle.tree.fullVarDecl(member)) |full_var_decl| {
-            if (likely == .trycall_decl_literal) continue;
+            if (likely == .trycall_decl_literal or likely.omitDecl()) continue;
             const resolved_var_ty =
                 try builder.analyser.resolveTypeOfNode(.{
                 .handle = handle,
@@ -1495,10 +1506,19 @@ fn collectContainerNodes(
 
 fn resolveBuiltinFnArg(
     analyser: *Analyser,
+    handle: *DocumentStore.Handle,
+    loc: offsets.Loc,
     arg_index: usize,
     /// Includes leading `@`
     name: []const u8,
 ) std.mem.Allocator.Error!?Analyser.Type {
+    if (std.mem.eql(u8, name, "@This")) {
+        const tree = handle.tree;
+        const nodes = try ast.nodesOverlappingIndex(analyser.arena.allocator(), tree, loc.start);
+        if (nodes.len == 0) return null;
+        return try Analyser.innermostContainer(handle, tree.tokens.items(.start)[tree.firstToken(nodes[0])]);
+    }
+
     const builtin_name: []const u8 = name: {
         if (std.mem.eql(u8, name, "@Type")) {
             switch (arg_index) {
@@ -1608,6 +1628,8 @@ fn collectBuiltinContainerNodes(
     if (dot_context.need_ret_type) return;
     if (try resolveBuiltinFnArg(
         builder.analyser,
+        handle,
+        loc,
         dot_context.fn_arg_index,
         handle.tree.source[loc.start..loc.end],
     )) |ty| {
