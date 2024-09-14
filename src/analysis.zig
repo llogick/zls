@@ -1377,6 +1377,8 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
     const token_tags = tree.tokens.items(.tag);
     const starts = tree.tokens.items(.start);
 
+    const arena = analyser.arena.allocator();
+
     switch (node_tags[node]) {
         .global_var_decl,
         .local_var_decl,
@@ -1445,12 +1447,12 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
             var buf: [1]Ast.Node.Index = undefined;
             const fn_proto = func_tree.fullFnProto(&buf, func_node).?;
 
-            var params = try std.ArrayListUnmanaged(Ast.full.FnProto.Param).initCapacity(analyser.arena.allocator(), fn_proto.ast.params.len);
-            defer params.deinit(analyser.arena.allocator());
+            var params = try std.ArrayListUnmanaged(Ast.full.FnProto.Param).initCapacity(arena, fn_proto.ast.params.len);
+            defer params.deinit(arena);
 
             var it = fn_proto.iterate(&func_handle.tree);
             while (ast.nextFnParam(&it)) |param| {
-                try params.append(analyser.arena.allocator(), param);
+                try params.append(arena, param);
             }
 
             const has_self_param = call.ast.params.len + 1 == params.items.len and
@@ -1564,7 +1566,7 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
             const child_ty = try analyser.resolveTypeOfNodeInternal(.{ .node = datas[node].lhs, .handle = handle }) orelse return null;
             if (!child_ty.is_type_val) return null;
 
-            const child_ty_ptr = try analyser.arena.allocator().create(Type);
+            const child_ty_ptr = try arena.create(Type);
             child_ty_ptr.* = child_ty;
 
             return Type{ .data = .{ .optional = child_ty_ptr }, .is_type_val = true };
@@ -1581,7 +1583,7 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
             const elem_ty = try analyser.resolveTypeOfNodeInternal(.{ .node = ptr_info.ast.child_type, .handle = handle }) orelse return null;
             if (!elem_ty.is_type_val) return null;
 
-            const elem_ty_ptr = try analyser.arena.allocator().create(Type);
+            const elem_ty_ptr = try arena.create(Type);
             elem_ty_ptr.* = elem_ty;
             return Type{
                 .data = .{
@@ -1606,7 +1608,7 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
             const elem_ty = try analyser.resolveTypeOfNodeInternal(.{ .node = array_info.ast.elem_type, .handle = handle }) orelse return null;
             if (!elem_ty.is_type_val) return null;
 
-            const elem_ty_ptr = try analyser.arena.allocator().create(Type);
+            const elem_ty_ptr = try arena.create(Type);
             elem_ty_ptr.* = elem_ty;
 
             return Type{
@@ -1641,7 +1643,7 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
             const maybe_elem_ty = try analyser.resolveTypeOfNodeInternal(.{ .node = array_init_info.ast.elements[0], .handle = handle });
             const elem_ty = if (maybe_elem_ty) |elem_ty| elem_ty.typeOf(analyser) else try Type.typeValFromIP(analyser, .type_type);
 
-            const elem_ty_ptr = try analyser.arena.allocator().create(Type);
+            const elem_ty_ptr = try arena.create(Type);
             elem_ty_ptr.* = elem_ty;
 
             return Type{
@@ -1660,10 +1662,10 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
             const payload = try analyser.resolveTypeOfNodeInternal(.{ .node = datas[node].rhs, .handle = handle }) orelse return null;
             if (!payload.is_type_val) return null;
 
-            const error_set_ptr = try analyser.arena.allocator().create(Type);
+            const error_set_ptr = try arena.create(Type);
             error_set_ptr.* = error_set;
 
-            const payload_ptr = try analyser.arena.allocator().create(Type);
+            const payload_ptr = try arena.create(Type);
             payload_ptr.* = payload;
 
             return Type{
@@ -1765,11 +1767,11 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
 
                 const import_str = tree.tokenSlice(main_tokens[import_param]);
                 const import_uri = (try analyser.store.uriFromImportStr(
-                    analyser.arena.allocator(),
+                    arena,
                     handle,
                     import_str[1 .. import_str.len - 1],
                 )) orelse (try analyser.store.uriFromImportStr(
-                    analyser.arena.allocator(),
+                    arena,
                     analyser.root_handle orelse return null,
                     import_str[1 .. import_str.len - 1],
                 )) orelse return null;
@@ -1907,9 +1909,9 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
             if (try analyser.resolveTypeOfNodeInternal(.{ .handle = handle, .node = if_node.ast.then_expr })) |t|
                 either.appendAssumeCapacity(.{ .type = t, .descriptor = offsets.nodeToSlice(tree, if_node.ast.cond_expr) });
             if (try analyser.resolveTypeOfNodeInternal(.{ .handle = handle, .node = if_node.ast.else_expr })) |t|
-                either.appendAssumeCapacity(.{ .type = t, .descriptor = try std.fmt.allocPrint(analyser.arena.allocator(), "!({s})", .{offsets.nodeToSlice(tree, if_node.ast.cond_expr)}) });
+                either.appendAssumeCapacity(.{ .type = t, .descriptor = try std.fmt.allocPrint(arena, "!({s})", .{offsets.nodeToSlice(tree, if_node.ast.cond_expr)}) });
 
-            return Type.fromEither(analyser.arena.allocator(), either.constSlice());
+            return Type.fromEither(arena, either.constSlice());
         },
         .@"switch",
         .switch_comma,
@@ -1924,18 +1926,18 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, node_handle: NodeWithHandle) e
                 var descriptor = std.ArrayListUnmanaged(u8){};
 
                 for (switch_case.ast.values, 0..) |values, index| {
-                    try descriptor.appendSlice(analyser.arena.allocator(), offsets.nodeToSlice(tree, values));
-                    if (index != switch_case.ast.values.len - 1) try descriptor.appendSlice(analyser.arena.allocator(), ", ");
+                    try descriptor.appendSlice(arena, offsets.nodeToSlice(tree, values));
+                    if (index != switch_case.ast.values.len - 1) try descriptor.appendSlice(arena, ", ");
                 }
 
                 if (try analyser.resolveTypeOfNodeInternal(.{ .handle = handle, .node = switch_case.ast.target_expr })) |t|
-                    try either.append(analyser.arena.allocator(), .{
+                    try either.append(arena, .{
                         .type = t,
-                        .descriptor = try descriptor.toOwnedSlice(analyser.arena.allocator()),
+                        .descriptor = try descriptor.toOwnedSlice(arena),
                     });
             }
 
-            return Type.fromEither(analyser.arena.allocator(), either.items);
+            return Type.fromEither(arena, either.items);
         },
         .@"while",
         .while_simple,
@@ -2964,6 +2966,12 @@ pub const Type = struct {
             .compile_error => |node_handle| try writer.writeAll(offsets.nodeToSlice(node_handle.handle.tree, node_handle.node)),
         }
     }
+
+    pub fn createAndInit(arena: std.mem.Allocator, val: @This()) error{OutOfMemory}!*@This() {
+        const new = try arena.create(@This());
+        new.* = val;
+        return new;
+    }
 };
 
 pub const ScopeWithHandle = struct {
@@ -3839,6 +3847,8 @@ pub const DeclWithHandle = struct {
         const tracy_zone = tracy.trace(@src());
         defer tracy_zone.end();
 
+        const arena = analyser.arena.allocator();
+
         const tree = self.handle.tree;
         const resolved_ty = switch (self.decl) {
             .ast_node => |node| try analyser.resolveTypeOfNodeInternal(
@@ -3876,7 +3886,7 @@ pub const DeclWithHandle = struct {
                     }
 
                     const refs = try references.callsiteReferences(
-                        analyser.arena.allocator(),
+                        arena,
                         analyser,
                         .{ .decl = func_decl, .handle = self.handle },
                         false,
@@ -3919,13 +3929,13 @@ pub const DeclWithHandle = struct {
                         };
 
                         const loc = offsets.tokenToPosition(tree, tree.nodes.items(.main_token)[call.ast.params[real_param_idx]], .@"utf-8");
-                        try possible.append(analyser.arena.allocator(), .{
+                        try possible.append(arena, .{
                             .type = ty,
-                            .descriptor = try std.fmt.allocPrint(analyser.arena.allocator(), "{s}:{d}:{d}", .{ handle.uri, loc.line + 1, loc.character + 1 }),
+                            .descriptor = try std.fmt.allocPrint(arena, "{s}:{d}:{d}", .{ handle.uri, loc.line + 1, loc.character + 1 }),
                         });
                     }
 
-                    const maybe_type = try Type.fromEither(analyser.arena.allocator(), possible.items);
+                    const maybe_type = try Type.fromEither(arena, possible.items);
                     if (maybe_type) |ty| analyser.resolved_callsites.getPtr(pay).?.* = ty;
                     break :blk maybe_type;
                 }
@@ -4019,8 +4029,10 @@ pub const DeclWithHandle = struct {
 
         if (!self.isCaptureByRef()) return resolved_ty;
 
-        const resolved_ty_ptr = try analyser.arena.allocator().create(Type);
-        resolved_ty_ptr.* = resolved_ty.typeOf(analyser);
+        // const resolved_ty_ptr = try arena.create(Type);
+        // resolved_ty_ptr.* = resolved_ty.typeOf(analyser);
+
+        const resolved_ty_ptr: *Type = try .createAndInit(arena, resolved_ty.typeOf(analyser));
 
         return Type{
             .data = .{ .pointer = .{
@@ -4433,6 +4445,10 @@ pub fn lookupSymbolFieldInit(
         nodes[0],
         nodes[1..],
     )) orelse return null;
+
+    // `const v: *T = .create(gpa);`
+    if (try analyser.resolveDerefType(container_type)) |unwrapped|
+        container_type = unwrapped;
 
     if (try analyser.resolveUnwrapErrorUnionType(container_type, .payload)) |unwrapped|
         container_type = unwrapped;
