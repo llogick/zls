@@ -4029,10 +4029,10 @@ pub const DeclWithHandle = struct {
 
         if (!self.isCaptureByRef()) return resolved_ty;
 
-        // const resolved_ty_ptr = try arena.create(Type);
-        // resolved_ty_ptr.* = resolved_ty.typeOf(analyser);
+        const resolved_ty_ptr = try arena.create(Type);
+        resolved_ty_ptr.* = resolved_ty.typeOf(analyser);
 
-        const resolved_ty_ptr: *Type = try .createAndInit(arena, resolved_ty.typeOf(analyser));
+        // const resolved_ty_ptr: *Type = try .createAndInit(arena, resolved_ty.typeOf(analyser));
 
         return Type{
             .data = .{ .pointer = .{

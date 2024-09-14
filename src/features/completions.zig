@@ -1406,7 +1406,9 @@ fn collectContainerFields(
             if (has_self_param) continue;
             const ret_ty = try builder.analyser.resolveReturnType(full_fn_proto, handle, null) orelse continue;
             if (likely == .trycall_decl_literal and ret_ty.data != .error_union) continue;
-            const resolved_ret_ty = try builder.analyser.resolveUnwrapErrorUnionType(ret_ty, .payload) orelse ret_ty;
+            var resolved_ret_ty = try builder.analyser.resolveUnwrapErrorUnionType(ret_ty, .payload) orelse ret_ty;
+            // TODO better type matching
+            if (try builder.analyser.resolveDerefType(resolved_ret_ty)) |ty| resolved_ret_ty = ty; // single pointer .payload
             if (resolved_ret_ty.data != .container) continue;
             if (resolved_ret_ty.data.container.handle != container_scope.handle and
                 resolved_ret_ty.data.container.scope != container_scope.scope) continue;
