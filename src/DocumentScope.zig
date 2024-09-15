@@ -863,6 +863,7 @@ noinline fn walkContainerDecl(
                 container_field.convertToNonTupleLike(tree.nodes);
                 if (container_field.ast.tuple_like) continue;
                 const main_token = container_field.ast.main_token;
+                if (token_tags[main_token] != .identifier) continue;
                 try scope.pushDeclaration(main_token, .{ .ast_node = decl }, .field);
 
                 if (is_enum_or_tagged_union) {
