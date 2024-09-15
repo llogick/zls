@@ -4017,7 +4017,10 @@ pub const DeclWithHandle = struct {
                 for (case.ast.values) |case_value| {
                     if (tree.nodes.items(.tag)[case_value] != .enum_literal) continue;
 
-                    const name = tree.tokenSlice(tree.nodes.items(.main_token)[case_value]);
+                    const name_token = tree.nodes.items(.main_token)[case_value];
+                    if (tree.tokens.items(.tag)[name_token] != .identifier) continue;
+                    const name = offsets.identifierTokenToNameSlice(tree, name_token);
+
                     const decl = try switch_expr_type.lookupSymbol(analyser, name) orelse continue;
                     break :blk (try decl.resolveType(analyser)) orelse continue;
                 }
