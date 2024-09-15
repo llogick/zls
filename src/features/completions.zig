@@ -1522,7 +1522,7 @@ fn resolveBuiltinFnArg(
     }
 
     const builtin_name: []const u8 = name: {
-        if (std.mem.eql(u8, name, "@Type") or std.mem.eql(u8, name, "@typeInfo")) {
+        if (std.mem.eql(u8, name, "@Type")) {
             switch (arg_index) {
                 0 => break :name "Type",
                 else => return null,
@@ -1627,7 +1627,17 @@ fn collectBuiltinContainerNodes(
     dot_context: EnumLiteralContext,
     types_with_handles: *std.ArrayListUnmanaged(Analyser.Type),
 ) error{OutOfMemory}!void {
-    if (dot_context.need_ret_type and !std.mem.eql(u8, handle.tree.source[loc.start..loc.end], "@typeInfo")) return;
+    if (dot_context.need_ret_type) {
+        const name = handle.tree.source[loc.start..loc.end];
+        const ty = blk: {
+            if (std.mem.eql(u8, name, "@typeInfo")) {
+                break :blk try builder.analyser.instanceStdBuiltinType("Type") orelse return;
+            }
+            return;
+        };
+        try types_with_handles.append(builder.arena, ty);
+        return;
+    }
     if (try resolveBuiltinFnArg(
         builder.analyser,
         handle,
