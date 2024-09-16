@@ -6,10 +6,16 @@ const builtin = @import("builtin");
 const zls_version = std.SemanticVersion{ .major = 0, .minor = 14, .patch = 0, .pre = "dev" };
 
 /// Specify the minimum Zig version that is required to compile and test ZLS:
-/// "std: update std.builtin.Type fields to follow naming conventions" (#21225)
+/// std.zig.tokenizer: simplify line-based tokens
+///
+/// If you do not use Nix, a ZLS maintainer can take care of this.
+/// Whenever this version is increased, run the following command:
+/// ```bash
+/// nix flake update --commit-lock-file
+/// ```
 ///
 /// Must match the `minimum_zig_version` in `build.zig.zon`.
-const minimum_build_zig_version = "0.14.0-dev.1346+31fef6f11";
+const minimum_build_zig_version = "0.14.0-dev.1517+900753455";
 
 /// Specify the minimum Zig version that is required to run ZLS:
 /// Release 0.12.0
