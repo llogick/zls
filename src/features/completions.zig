@@ -810,7 +810,22 @@ fn completeError(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!?void {
     var dot_context = getSwitchOrStructInitContext(builder, dot_token_index) orelse return null;
     if (dot_context.likely != .switch_case) return null;
 
-    // The std parser can't handle the `switch (err) {error.}` => find the fn manually
+    // ```zig
+    //  fcall() catch |err| {
+    //      const .. = switch (err) {
+    //  }
+    // ```
+    const name_loc = offsets.tokenToLoc(tree, dot_context.identifier_token_index);
+    var types_list = std.ArrayListUnmanaged(Analyser.Type){};
+    try collectVarAccessContainerNodes(builder, builder.orig_handle, name_loc, dot_context, &types_list);
+    if (types_list.items.len != 0) {
+        for (types_list.items) |ty| {
+            _ = try collectErrorTypeFields(builder, ty);
+        }
+        return;
+    }
+
+    // The std parser can't handle `fcall() catch |err| switch (err) {error.}` => find the fn manually
     if (token_tags[dot_context.identifier_token_index - 6] != .keyword_catch) return null;
     dot_context.identifier_token_index -= 7;
     if (token_tags[dot_context.identifier_token_index] != .r_paren) return null;
