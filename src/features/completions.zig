@@ -1386,7 +1386,7 @@ fn collectContainerFields(
                 .node = full_var_decl.ast.type_node,
             }) orelse continue;
             if (resolved_var_ty.data != .container) continue;
-            if (resolved_var_ty.data.container.handle != handle and
+            if (resolved_var_ty.data.container.handle != handle or
                 resolved_var_ty.data.container.scope != container_scope.scope) continue;
             const name = handle.tree.tokenSlice(full_var_decl.ast.mut_token + 1);
             try builder.completions.append(builder.arena, .{
@@ -1411,7 +1411,7 @@ fn collectContainerFields(
             // TODO better type matching
             if (try builder.analyser.resolveDerefType(resolved_ret_ty)) |ty| resolved_ret_ty = ty; // single pointer .payload
             if (resolved_ret_ty.data != .container) continue;
-            if (resolved_ret_ty.data.container.handle != container_scope.handle and
+            if (resolved_ret_ty.data.container.handle != container_scope.handle or
                 resolved_ret_ty.data.container.scope != container_scope.scope) continue;
             const name = handle.tree.tokenSlice(full_fn_proto.name_token orelse continue);
             if (try functionTypeCompletion(builder, name, container, func_ty)) |completion| try builder.completions.append(builder.arena, completion);
