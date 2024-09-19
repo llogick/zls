@@ -3323,7 +3323,8 @@ pub const PositionContext = union(enum) {
     char_literal: offsets.Loc,
     /// XXX: Internal use only, currently points to the loc of the first l_paren
     parens_expr: offsets.Loc,
-    keyword: std.zig.Token.Tag,
+    /// `addrspace`, `callconv`
+    kwcall: std.zig.Token.Tag,
     pre_label,
     label: bool,
     other,
@@ -3343,7 +3344,7 @@ pub const PositionContext = union(enum) {
             .number_literal => |r| r,
             .char_literal => |r| r,
             .parens_expr => |r| r,
-            .keyword => null,
+            .kwcall => null,
             .pre_label => null,
             .label => null,
             .other => null,
@@ -3578,13 +3579,11 @@ pub fn getPositionContext(
                 .period, .period_asterisk => switch (curr_ctx.ctx) {
                     .empty, .pre_label => curr_ctx.ctx = .{ .enum_literal = tok.loc },
                     .enum_literal => curr_ctx.ctx = .empty,
-                    .field_access => {},
-                    .keyword => return .other, // no keyword can be `.`/`.*` accessed
-                    .other => {},
-                    .global_error_set => {},
+                    .kwcall => curr_ctx.ctx = .other, // no keyword can be `.`/`.*` accessed
                     .label => |filled| if (filled) {
                         curr_ctx.ctx = .{ .enum_literal = tok.loc };
                     },
+                    .other, .field_access, .global_error_set => {},
                     else => curr_ctx.ctx = .{
                         .field_access = tokenLocAppend(curr_ctx.ctx.loc().?, tok),
                     },
@@ -3629,7 +3628,7 @@ pub fn getPositionContext(
                         return PositionContext{ .char_literal = tok.loc };
                     }
                 },
-                .keyword_callconv, .keyword_addrspace => curr_ctx.ctx = .{ .keyword = tok.tag },
+                .keyword_callconv, .keyword_addrspace => curr_ctx.ctx = .{ .kwcall = tok.tag },
                 else => curr_ctx.ctx = .empty,
             }
 

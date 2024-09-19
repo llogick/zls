@@ -1516,7 +1516,7 @@ fn collectContainerNodes(
         .field_access => |loc| try collectFieldAccessContainerNodes(builder, handle, loc, dot_context, &types_with_handles),
         .enum_literal => |loc| try collectEnumLiteralContainerNodes(builder, handle, loc, &types_with_handles),
         .builtin => |loc| try collectBuiltinContainerNodes(builder, handle, loc, dot_context, &types_with_handles),
-        .keyword => |tag| try collectKeywordFnContainerNodes(builder, tag, dot_context, &types_with_handles),
+        .kwcall => |tag| try collectKeywordFnContainerNodes(builder, tag, dot_context, &types_with_handles),
         else => {},
     }
     return types_with_handles.toOwnedSlice(builder.arena);
