@@ -4708,10 +4708,21 @@ pub fn resolveExpressionTypeFromAncestors(
         },
         .assign => {
             if (node == datas[ancestors[0]].rhs) {
-                return try analyser.resolveTypeOfNode(.{
+                const maybe_lhs_ty = try analyser.resolveTypeOfNode(.{
                     .node = datas[ancestors[0]].lhs,
                     .handle = handle,
                 });
+                // The following logic adresses `unresolvable = T{...};`
+                // Example: `gop.key_ptr.* = types.CompletionItem{..`,
+                //                        ^ gets "resolved" to 'u32'
+                // This is important to be able to gen inlay hints for struct_init*
+                const rhs_ty = try analyser.resolveTypeOfNode(.{
+                    .node = datas[ancestors[0]].rhs,
+                    .handle = handle,
+                }) orelse return maybe_lhs_ty;
+                const lhs_ty = maybe_lhs_ty orelse return maybe_lhs_ty;
+                if (!lhs_ty.eql(rhs_ty)) return rhs_ty;
+                return lhs_ty;
             }
         },
 
