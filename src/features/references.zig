@@ -444,7 +444,9 @@ pub fn referencesHandler(server: *Server, arena: std.mem.Allocator, request: Gen
 
     var source_index = offsets.positionToIndex(handle.tree.source, request.position(), server.offset_encoding);
     if (!(source_index < handle.tree.source.len)) source_index = handle.tree.source.len - 1;
-    const name_loc = Analyser.identifierLocFromIndex(handle.tree, source_index) orelse return null;
+    const name_tok = offsets.sourceIndexToTokenIndex(handle.tree, source_index);
+    if (handle.tree.tokens.items(.tag)[name_tok] != .identifier) return null;
+    const name_loc = offsets.identifierTokenToNameLoc(handle.tree, name_tok);
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     const pos_context = try Analyser.getPositionContext(server.allocator, handle.tree, source_index, true);
 

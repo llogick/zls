@@ -81,7 +81,9 @@ fn gotoDefinitionLabel(
     defer tracy_zone.end();
     _ = arena;
 
-    const name_loc = Analyser.identifierLocFromIndex(handle.tree, pos_index) orelse return null;
+    const name_tok = offsets.sourceIndexToTokenIndex(handle.tree, pos_index);
+    if (handle.tree.tokens.items(.tag)[name_tok] != .identifier) return null;
+    const name_loc = offsets.identifierTokenToNameLoc(handle.tree, name_tok);
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     const decl = (try Analyser.lookupLabel(handle, name, pos_index)) orelse return null;
     return try gotoDefinitionSymbol(analyser, offsets.locToRange(handle.tree.source, name_loc, offset_encoding), decl, kind, offset_encoding);
@@ -99,7 +101,9 @@ fn gotoDefinitionGlobal(
     defer tracy_zone.end();
     _ = arena;
 
-    const name_loc = Analyser.identifierLocFromIndex(handle.tree, pos_index) orelse return null;
+    const name_tok = offsets.sourceIndexToTokenIndex(handle.tree, pos_index);
+    if (handle.tree.tokens.items(.tag)[name_tok] != .identifier) return null;
+    const name_loc = offsets.identifierTokenToNameLoc(handle.tree, name_tok);
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     const decl = (try analyser.lookupSymbolGlobal(handle, name, pos_index)) orelse return null;
     return try gotoDefinitionSymbol(analyser, offsets.locToRange(handle.tree.source, name_loc, offset_encoding), decl, kind, offset_encoding);
@@ -116,7 +120,9 @@ fn gotoDefinitionEnumLiteral(
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
-    const name_loc = Analyser.identifierLocFromIndex(handle.tree, source_index) orelse return null;
+    const name_tok = offsets.sourceIndexToTokenIndex(handle.tree, source_index);
+    if (handle.tree.tokens.items(.tag)[name_tok] != .identifier) return null;
+    const name_loc = offsets.identifierTokenToNameLoc(handle.tree, name_tok);
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     const decl = (try analyser.getSymbolEnumLiteral(arena, handle, source_index, name)) orelse return null;
     return try gotoDefinitionSymbol(analyser, offsets.locToRange(handle.tree.source, name_loc, offset_encoding), decl, kind, offset_encoding);
@@ -131,8 +137,7 @@ fn gotoDefinitionBuiltin(
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
-    const name_loc = offsets.tokenIndexToLoc(handle.tree.source, loc.start);
-    const name = offsets.locToSlice(handle.tree.source, name_loc);
+    const name = offsets.locToSlice(handle.tree.source, loc);
     if (std.mem.eql(u8, name, "@cImport")) {
         const tree = handle.tree;
         const index = for (handle.cimports.items(.node), 0..) |cimport_node, index| {
@@ -149,7 +154,7 @@ fn gotoDefinitionBuiltin(
         switch (result) {
             .failure => return null,
             .success => |uri| return types.DefinitionLink{
-                .originSelectionRange = offsets.locToRange(handle.tree.source, name_loc, offset_encoding),
+                .originSelectionRange = offsets.locToRange(handle.tree.source, loc, offset_encoding),
                 .targetUri = uri,
                 .targetRange = target_range,
                 .targetSelectionRange = target_range,
@@ -172,7 +177,9 @@ fn gotoDefinitionFieldAccess(
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
-    const name_loc = Analyser.identifierLocFromIndex(handle.tree, source_index) orelse return null;
+    const name_tok = offsets.sourceIndexToTokenIndex(handle.tree, source_index);
+    if (handle.tree.tokens.items(.tag)[name_tok] != .identifier) return null;
+    const name_loc = offsets.identifierTokenToNameLoc(handle.tree, name_tok);
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     const held_loc = offsets.locMerge(loc, name_loc);
     const accesses = (try analyser.getSymbolFieldAccesses(arena, handle, source_index, held_loc, name)) orelse return null;
