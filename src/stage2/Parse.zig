@@ -3402,8 +3402,13 @@ fn parseSwitchProng(p: *Parse) !Node.Index {
 
     const is_inline = p.eatToken(.keyword_inline) != null;
 
-    if (p.eatToken(.keyword_else) == null) {
+    if (p.eatToken(.keyword_else) == null) blk: {
         while (true) {
+            if (p.token_tags[p.tok_i] == .period and p.token_tags[p.tok_i + 1] == .keyword_else) { // zls
+                try p.warn(.expected_expr);
+                p.tok_i += 2;
+                break :blk;
+            }
             if (p.token_tags[p.tok_i] == .period and p.token_tags[p.tok_i + 1] == .period) { // zls
                 try p.warn(.expected_expr);
                 p.tok_i += 1;
