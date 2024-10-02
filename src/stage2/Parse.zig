@@ -3427,6 +3427,10 @@ fn parseSwitchProng(p: *Parse) !Node.Index {
             return null_node;
         }
     }
+    if (p.token_tags[p.tok_i] == .period and p.token_tags[p.tok_i + 1] == .period) { // zls
+        try p.warn(.expected_expr);
+        p.tok_i += 1;
+    }
     const arrow_token = try p.expectToken(.equal_angle_bracket_right);
     _ = try p.parsePtrIndexPayload();
 
