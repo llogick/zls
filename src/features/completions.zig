@@ -1412,6 +1412,7 @@ fn collectContainerFields(
                 .insertTextFormat = .PlainText,
             });
         } else if (handle.tree.fullFnProto(&buffer1, member)) |full_fn_proto| {
+            if (likely == .field) continue;
             const func_ty: Analyser.Type = .typeVal(.{ .handle = handle, .node = member });
             const has_self_param = try builder.analyser.firstParamIs(func_ty, .{
                 .data = .{
