@@ -53,6 +53,7 @@ status: Status = .uninitialized,
 
 // private fields
 thread_pool: if (zig_builtin.single_threaded) void else std.Thread.Pool,
+thread_pool2: if (zig_builtin.single_threaded) void else std.Thread.Pool,
 wait_group: if (zig_builtin.single_threaded) void else std.Thread.WaitGroup,
 job_queue: std.fifo.LinearFifo(Job, .Dynamic),
 job_queue_lock: std.Thread.Mutex = .{},
@@ -159,13 +160,25 @@ pub const Status = enum {
 const Job = union(enum) {
     incoming_message: std.json.Parsed(Message),
     generate_diagnostics: DocumentStore.Uri,
+    generate_ast: struct {
+        uri: DocumentStore.Uri,
+        version: i32,
+    },
+    update_ast: struct {
+        uri: DocumentStore.Uri,
+        version: i32,
+        ast: Ast,
+    },
     run_build_on_save,
 
     fn deinit(self: Job, allocator: std.mem.Allocator) void {
         switch (self) {
             .incoming_message => |parsed_message| parsed_message.deinit(),
             .generate_diagnostics => |uri| allocator.free(uri),
-            .run_build_on_save => {},
+            .generate_ast => |ver_uri| allocator.free(ver_uri.uri),
+            .update_ast => |uri_ast| allocator.free(uri_ast.uri),
+            .run_build_on_save,
+            => {},
         }
     }
 
@@ -183,7 +196,8 @@ const Job = union(enum) {
     fn syncMode(self: Job) SynchronizationMode {
         return switch (self) {
             .incoming_message => |parsed_message| if (isBlockingMessage(parsed_message.value)) .exclusive else .shared,
-            .generate_diagnostics => .shared,
+            .generate_diagnostics, .generate_ast => .shared,
+            .update_ast => .exclusive,
             .run_build_on_save => .atomic,
         };
     }
@@ -615,20 +629,20 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
                 .triggerCharacters = &[_][]const u8{ ".", ":", "@", "]", "/" },
                 .completionItem = .{ .labelDetailsSupport = true },
             },
-            .documentHighlightProvider = .{ .bool = true },
+            // .documentHighlightProvider = .{ .bool = true },
             .hoverProvider = .{ .bool = true },
-            .codeActionProvider = .{ .bool = true },
+            // .codeActionProvider = .{ .bool = true },
             .declarationProvider = .{ .bool = true },
             .definitionProvider = .{ .bool = true },
             .typeDefinitionProvider = .{ .bool = true },
             .implementationProvider = .{ .bool = false },
-            .referencesProvider = .{ .bool = true },
-            .documentSymbolProvider = .{ .bool = true },
+            // .referencesProvider = .{ .bool = true },
+            // .documentSymbolProvider = .{ .bool = true },
             .colorProvider = .{ .bool = false },
             .documentFormattingProvider = .{ .bool = true },
             .documentRangeFormattingProvider = .{ .bool = false },
-            .foldingRangeProvider = .{ .bool = true },
-            .selectionRangeProvider = .{ .bool = true },
+            // .foldingRangeProvider = .{ .bool = true },
+            // .selectionRangeProvider = .{ .bool = true },
             .workspaceSymbolProvider = .{ .bool = false },
             .workspace = .{
                 .workspaceFolders = .{
@@ -636,17 +650,17 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
                     .changeNotifications = .{ .bool = true },
                 },
             },
-            .semanticTokensProvider = .{
-                .SemanticTokensOptions = .{
-                    .full = .{ .bool = true },
-                    .range = .{ .bool = true },
-                    .legend = .{
-                        .tokenTypes = std.meta.fieldNames(semantic_tokens.TokenType),
-                        .tokenModifiers = std.meta.fieldNames(semantic_tokens.TokenModifiers),
-                    },
-                },
-            },
-            .inlayHintProvider = .{ .bool = true },
+            // .semanticTokensProvider = .{
+            //     .SemanticTokensOptions = .{
+            //         .full = .{ .bool = true },
+            //         .range = .{ .bool = true },
+            //         .legend = .{
+            //             .tokenTypes = std.meta.fieldNames(semantic_tokens.TokenType),
+            //             .tokenModifiers = std.meta.fieldNames(semantic_tokens.TokenModifiers),
+            //         },
+            //     },
+            // },
+            // .inlayHintProvider = .{ .bool = true },
         },
     };
 }
@@ -1304,6 +1318,7 @@ fn resolveConfiguration(
     return result;
 }
 
+// blocking -> doesn't need a lock
 fn openDocumentHandler(server: *Server, _: std.mem.Allocator, notification: types.DidOpenTextDocumentParams) Error!void {
     if (notification.textDocument.text.len > DocumentStore.max_document_size) {
         log.err("open document '{s}' failed: text size ({d}) is above maximum length ({d})", .{
@@ -1314,7 +1329,7 @@ fn openDocumentHandler(server: *Server, _: std.mem.Allocator, notification: type
         return error.InternalError;
     }
 
-    try server.document_store.openDocument(notification.textDocument.uri, notification.textDocument.text);
+    try server.document_store.openDocument(notification.textDocument);
 
     if (server.client_capabilities.supports_publish_diagnostics) {
         try server.pushJob(.{
@@ -1323,10 +1338,12 @@ fn openDocumentHandler(server: *Server, _: std.mem.Allocator, notification: type
     }
 }
 
+// blocking -> doesn't need a lock
+// blocking -> the only fn that sets handle.version all others ok to read
 fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: types.DidChangeTextDocumentParams) Error!void {
-    const handle = server.document_store.getHandle(notification.textDocument.uri) orelse return;
+    const handle = server.document_store.getHandleUnsafe(notification.textDocument.uri) orelse return;
 
-    const new_text = try diff.applyContentChanges(server.allocator, handle.tree.source, notification.contentChanges, server.offset_encoding);
+    const new_text = try diff.applyContentChanges(server.allocator, handle.text, notification.contentChanges, server.offset_encoding);
 
     if (new_text.len > DocumentStore.max_document_size) {
         log.err("change document '{s}' failed: text size ({d}) is above maximum length ({d})", .{
@@ -1337,15 +1354,23 @@ fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: ty
         return error.InternalError;
     }
 
-    try server.document_store.refreshDocument(handle.uri, new_text);
-
+    try server.document_store.refreshDocument(notification.textDocument, new_text);
+    std.log.debug("refreshDoc OK", .{});
     if (server.client_capabilities.supports_publish_diagnostics) {
-        try server.pushJob(.{
-            .generate_diagnostics = try server.allocator.dupe(u8, handle.uri),
-        });
+        const job: Job = .{
+            .generate_ast = .{
+                .uri = try server.allocator.dupe(u8, handle.uri),
+                .version = notification.textDocument.version,
+            },
+        };
+        errdefer job.deinit(server.allocator);
+        try server.thread_pool2.spawn(processJob, .{ server, job, null });
     }
+
+    std.log.debug("spawned genAst OK for version: {}", .{notification.textDocument.version});
 }
 
+// blocking -> doesn't need a lock
 fn saveDocumentHandler(server: *Server, arena: std.mem.Allocator, notification: types.DidSaveTextDocumentParams) Error!void {
     const uri = notification.textDocument.uri;
 
@@ -1379,6 +1404,7 @@ fn saveDocumentHandler(server: *Server, arena: std.mem.Allocator, notification: 
     }
 }
 
+// blocking -> doesn't need a lock
 fn closeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: types.DidCloseTextDocumentParams) error{}!void {
     server.document_store.closeDocument(notification.textDocument.uri);
 
@@ -1740,6 +1766,7 @@ fn isBlockingMessage(msg: Message) bool {
             .@"workspace/didChangeWorkspaceFolders",
             .@"workspace/didChangeConfiguration",
             => return true,
+            // .@"textDocument/didChange",
             .other => return false,
         },
         .response => return true,
@@ -1760,6 +1787,7 @@ pub fn create(allocator: std.mem.Allocator) !*Server {
         },
         .job_queue = std.fifo.LinearFifo(Job, .Dynamic).init(allocator),
         .thread_pool = undefined, // set below
+        .thread_pool2 = undefined, // set below
         .wait_group = if (zig_builtin.single_threaded) {} else .{},
     };
 
@@ -1768,7 +1796,11 @@ pub fn create(allocator: std.mem.Allocator) !*Server {
     } else {
         try server.thread_pool.init(.{
             .allocator = allocator,
-            .n_jobs = 4, // what is a good value here?
+            .n_jobs = 4,
+        });
+        try server.thread_pool2.init(.{
+            .allocator = allocator,
+            .n_jobs = 4,
         });
         server.document_store.thread_pool = &server.thread_pool;
     }
@@ -1782,6 +1814,7 @@ pub fn destroy(server: *Server) void {
     if (!zig_builtin.single_threaded) {
         server.wait_group.wait();
         server.thread_pool.deinit();
+        server.thread_pool2.deinit();
     }
 
     while (server.job_queue.readItem()) |job| job.deinit(server.allocator);
@@ -2007,11 +2040,46 @@ fn processJob(server: *Server, job: Job, wait_group: ?*std.Thread.WaitGroup) voi
         },
         .generate_diagnostics => |uri| {
             const handle = server.document_store.getHandle(uri) orelse return;
+            std.log.debug("gen_diag for: {s}", .{handle.uri});
             var arena_allocator = std.heap.ArenaAllocator.init(server.allocator);
             defer arena_allocator.deinit();
             const diagnostics = diagnostics_gen.generateDiagnostics(server, arena_allocator.allocator(), handle) catch return;
             const json_message = server.sendToClientNotification("textDocument/publishDiagnostics", diagnostics) catch return;
             server.allocator.free(json_message);
+        },
+        .generate_ast => |ver_uri| {
+            const handle = server.document_store.getHandleUnsafe(ver_uri.uri) orelse return;
+            std.log.debug("begin genAst for version: {}", .{ver_uri.version});
+            var new_ast = handle.*.genAst(ver_uri.version) catch return;
+            std.log.debug("genAst OK for version: {}", .{ver_uri.version});
+            const upd_ast_job: Job = .{
+                .update_ast = .{
+                    .uri = server.allocator.dupe(u8, handle.uri) catch {
+                        handle.*.impl.allocator.free(new_ast.source);
+                        new_ast.deinit(handle.*.impl.allocator);
+                        return;
+                    },
+                    .version = ver_uri.version,
+                    .ast = new_ast,
+                },
+            };
+            server.thread_pool2.spawn(processJob, .{ server, upd_ast_job, null }) catch {
+                job.deinit(server.allocator);
+                handle.*.impl.allocator.free(new_ast.source);
+                new_ast.deinit(handle.*.impl.allocator);
+                return;
+            };
+        },
+        .update_ast => |uri_ast| {
+            const handle = server.document_store.getHandleUnsafe(uri_ast.uri) orelse return;
+            std.log.debug("begin updateAst", .{});
+            handle.*.updateAst(uri_ast.ast, &server.document_store, uri_ast.version) catch return;
+            std.log.debug("updateAst OK", .{});
+            const gen_diag_job: Job = .{
+                .generate_diagnostics = server.allocator.dupe(u8, handle.uri) catch return,
+            };
+            server.thread_pool2.spawn(processJob, .{ server, gen_diag_job, null }) catch return;
+            std.log.debug("update_ast spawn'd gen_diag", .{});
         },
         .run_build_on_save => {
             if (!std.process.can_spawn) unreachable;

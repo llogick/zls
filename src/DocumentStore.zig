@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const lsp = @import("lsp");
 const URI = @import("uri.zig");
 const analysis = @import("analysis.zig");
 const offsets = @import("offsets.zig");
@@ -176,6 +177,9 @@ pub const BuildFile = struct {
 /// Represents a Zig source file.
 pub const Handle = struct {
     uri: Uri,
+    version: i32,
+    ast_version: i32,
+    text: [:0]const u8,
     tree: Ast,
     /// Contains one entry for every import in the document
     import_uris: std.ArrayListUnmanaged(Uri) = .{},
@@ -185,7 +189,7 @@ pub const Handle = struct {
     /// private field
     impl: struct {
         /// @bitCast from/to `Status`
-        status: std.atomic.Value(u32) = std.atomic.Value(u32).init(@bitCast(Status{})),
+        status: std.atomic.Value(u32) = .init(@bitCast(Status{})),
         /// TODO can we avoid storing one allocator per Handle?
         allocator: std.mem.Allocator,
 
@@ -249,11 +253,13 @@ pub const Handle = struct {
         const duped_uri = try allocator.dupe(u8, uri);
         errdefer allocator.free(duped_uri);
 
-        const tree = try parseTree(allocator, text);
-        errdefer tree.deinit(allocator);
+        const tree = try parseTree(@ptrFromInt(0x10), allocator, text, 0);
 
         return .{
             .uri = duped_uri,
+            .version = 0,
+            .ast_version = 0,
+            .text = text,
             .tree = tree,
             .impl = .{
                 .allocator = allocator,
@@ -469,12 +475,15 @@ pub const Handle = struct {
         }
     }
 
-    fn parseTree(allocator: std.mem.Allocator, new_text: [:0]const u8) error{OutOfMemory}!Ast {
+    fn parseTree(self: *Handle, allocator: std.mem.Allocator, new_text: [:0]const u8, version: i32) error{OutOfMemory}!Ast {
         const tracy_zone_inner = tracy.traceNamed(@src(), "Ast.parse");
         defer tracy_zone_inner.end();
 
-        var zls_ast = try Parser.parse(allocator, new_text, .zig);
+        errdefer allocator.free(new_text);
+
+        var zls_ast = try Parser.parse(self, allocator, new_text, .zig, version);
         errdefer zls_ast.deinit(allocator);
+
         var tree = Ast{
             .source = zls_ast.source,
             .tokens = zls_ast.tokens,
@@ -495,18 +504,37 @@ pub const Handle = struct {
         return tree;
     }
 
-    fn setSource(self: *Handle, new_text: [:0]const u8) error{OutOfMemory}!void {
+    pub fn genAst(self: *Handle, version: i32) error{OutOfMemory}!Ast {
         const tracy_zone = tracy.trace(@src());
         defer tracy_zone.end();
+
+        self.*.impl.lock.lock();
+        const working_text = self.impl.allocator.dupeZ(u8, self.text) catch |e| {
+            self.*.impl.lock.unlock();
+            return e;
+        };
+        const current_version = self.*.version;
+        self.*.impl.lock.unlock();
+
+        if (version != current_version) {
+            std.log.debug("skipping: {} vs {}", .{ version, current_version });
+            self.*.impl.allocator.free(working_text);
+            return error.OutOfMemory; // XXX error.Outdated
+        }
+
+        return parseTree(self, self.impl.allocator, working_text, version);
+    }
+
+    pub fn updateAst(self: *Handle, new_tree: Ast, doc_store: *DocumentStore, ast_version: i32) error{OutOfMemory}!void {
+        self.impl.lock.lock();
+        if (self.ast_version > ast_version) {
+            self.impl.lock.unlock();
+            return error.OutOfMemory; // XXX error.Outdated
+        }
 
         const new_status = Handle.Status{
             .open = self.getStatus().open,
         };
-
-        const new_tree = try parseTree(self.impl.allocator, new_text);
-
-        self.impl.lock.lock();
-        errdefer @compileError("");
 
         const old_status: Handle.Status = @bitCast(self.impl.status.swap(@bitCast(new_status), .acq_rel));
 
@@ -516,13 +544,23 @@ pub const Handle = struct {
         var old_document_scope = if (old_status.has_document_scope) self.impl.document_scope else null;
         var old_zir = if (old_status.has_zir) self.impl.zir else null;
 
+        // TODO: defer free/deinit
+
+        self.ast_version = ast_version;
         self.tree = new_tree;
-        self.import_uris = .{};
-        self.cimports = .{};
         self.impl.document_scope = undefined;
         self.impl.zir = undefined;
 
+        errdefer {
+            self.cimports.deinit(doc_store.allocator); // XXX check these allocators
+            self.impl.lock.unlock();
+        }
+        self.cimports = try collectCIncludes(doc_store.allocator, self.tree);
+
         self.impl.lock.unlock();
+
+        errdefer self.import_uris.deinit(doc_store.allocator); // collectImportUris might need a refactor to use handle.impl.allocator
+        self.import_uris = try doc_store.collectImportUris(self); // XXX does it's own lock
 
         self.impl.allocator.free(old_tree.source);
         old_tree.deinit(self.impl.allocator);
@@ -596,6 +634,14 @@ pub fn deinit(self: *DocumentStore) void {
 /// **Thread safe** takes a shared lock
 /// This function does not protect against data races from modifying the Handle
 pub fn getHandle(self: *DocumentStore, uri: Uri) ?*Handle {
+    self.lock.lockShared();
+    defer self.lock.unlockShared();
+    const handle = self.handles.get(uri) orelse return null;
+    if (handle.version != handle.ast_version) return null;
+    return handle;
+}
+
+pub fn getHandleUnsafe(self: *DocumentStore, uri: Uri) ?*Handle {
     self.lock.lockShared();
     defer self.lock.unlockShared();
     return self.handles.get(uri);
@@ -674,7 +720,7 @@ fn getOrLoadBuildFile(self: *DocumentStore, uri: Uri) ?*BuildFile {
 }
 
 /// **Thread safe** takes an exclusive lock
-pub fn openDocument(self: *DocumentStore, uri: Uri, text: []const u8) error{OutOfMemory}!void {
+pub fn openDocument(self: *DocumentStore, tdi: lsp.types.TextDocumentItem) error{OutOfMemory}!void {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
@@ -682,7 +728,7 @@ pub fn openDocument(self: *DocumentStore, uri: Uri, text: []const u8) error{OutO
         self.lock.lockShared();
         defer self.lock.unlockShared();
 
-        if (self.handles.get(uri)) |handle| {
+        if (self.handles.get(tdi.uri)) |handle| {
             _ = handle;
             // if (!handle.setOpen(true)) {
             //     log.warn("Document already open: {s}", .{uri});
@@ -691,8 +737,8 @@ pub fn openDocument(self: *DocumentStore, uri: Uri, text: []const u8) error{OutO
         }
     }
 
-    const duped_text = try self.allocator.dupeZ(u8, text);
-    _ = try self.createAndStoreDocument(uri, duped_text, true);
+    const duped_text = try self.allocator.dupeZ(u8, tdi.text);
+    _ = try self.createAndStoreDocument(tdi.uri, duped_text, true);
 }
 
 /// **Thread safe** takes a shared lock, takes an exclusive lock (with `tryLock`)
@@ -728,18 +774,23 @@ pub fn closeDocument(self: *DocumentStore, uri: Uri) void {
 /// Assumes that a document with the given `uri` is in the DocumentStore.
 ///
 /// **Thread safe** takes a shared lock when called on different documents
-/// **Not thread safe** when called on the same document
-pub fn refreshDocument(self: *DocumentStore, uri: Uri, new_text: [:0]const u8) !void {
+pub fn refreshDocument(self: *DocumentStore, tdi: lsp.types.VersionedTextDocumentIdentifier, new_text: [:0]const u8) !void {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
-    const handle = self.getHandle(uri).?;
+    const handle = self.getHandleUnsafe(tdi.uri).?;
     if (!handle.getStatus().open) {
-        log.warn("Document modified without being opened: {s}", .{uri});
+        log.warn("Document modified without being opened: {s}", .{tdi.uri});
     }
-    try handle.setSource(new_text);
-    handle.import_uris = try self.collectImportUris(handle);
-    handle.cimports = try collectCIncludes(self.allocator, handle.tree);
+
+    std.log.debug("new version: {}", .{tdi.version});
+    // handle.*.impl.lock.lock();
+    handle.*.text = new_text;
+    handle.*.version = tdi.version;
+    // handle.*.impl.lock.unlock();
+
+    // handle.import_uris = try self.collectImportUris(handle);
+    // handle.cimports = try collectCIncludes(self.allocator, handle.tree);
 }
 
 /// Invalidates a build files.

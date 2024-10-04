@@ -27,7 +27,13 @@ pub const Mode = enum { zig, zon };
 
 /// Result should be freed with tree.deinit() when there are
 /// no more references to any of the tokens or nodes.
-pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!Ast {
+pub fn parse(
+    handle: *Handle,
+    gpa: Allocator,
+    source: [:0]const u8,
+    mode: Mode,
+    version: i32,
+) Allocator.Error!Ast {
     var tokens = std.zig.Ast.TokenList{};
     defer tokens.deinit(gpa);
 
@@ -35,6 +41,8 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
     const estimated_token_count = source.len / 8;
     try tokens.ensureTotalCapacity(gpa, estimated_token_count);
 
+    var check_interval: i32 = 350;
+    std.log.debug("parsing: version: {}", .{version});
     var tokenizer = std.zig.Tokenizer.init(source);
     while (true) {
         const token = tokenizer.next();
@@ -43,6 +51,19 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
             .start = @as(u32, @intCast(token.loc.start)),
         });
         if (token.tag == .eof) break;
+        if (version != 0) {
+            if (check_interval == 0) {
+                check_interval = 350;
+                handle.*.impl.lock.lock();
+                defer handle.*.impl.lock.unlock();
+                // std.log.debug("doing a ver check: {} vs {}", .{handle.*.version, version});
+                if (handle.*.version != version) {
+                    std.log.debug("cancelling a parse for version: {}", .{version});
+                    return error.OutOfMemory; // XXX error.Outdated
+                }
+            }
+            check_interval -= 1;
+        }
     }
 
     var parser: Parse = .{
@@ -86,6 +107,7 @@ const testing = std.testing;
 const Ast = @This();
 const Allocator = std.mem.Allocator;
 const Parse = @import("Parse.zig");
+const Handle = @import("../DocumentStore.zig").Handle;
 
 test {
     testing.refAllDecls(@This());
