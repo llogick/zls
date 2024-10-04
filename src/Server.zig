@@ -53,7 +53,6 @@ status: Status = .uninitialized,
 
 // private fields
 thread_pool: if (zig_builtin.single_threaded) void else std.Thread.Pool,
-thread_pool2: if (zig_builtin.single_threaded) void else std.Thread.Pool,
 wait_group: if (zig_builtin.single_threaded) void else std.Thread.WaitGroup,
 job_queue: std.fifo.LinearFifo(Job, .Dynamic),
 job_queue_lock: std.Thread.Mutex = .{},
@@ -162,6 +161,7 @@ const Job = union(enum) {
     generate_diagnostics: DocumentStore.Uri,
     generate_ast: struct {
         uri: DocumentStore.Uri,
+        text: [:0]const u8,
         version: i32,
     },
     update_ast: struct {
@@ -1343,7 +1343,12 @@ fn openDocumentHandler(server: *Server, _: std.mem.Allocator, notification: type
 fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: types.DidChangeTextDocumentParams) Error!void {
     const handle = server.document_store.getHandleUnsafe(notification.textDocument.uri) orelse return;
 
-    const new_text = try diff.applyContentChanges(server.allocator, handle.text, notification.contentChanges, server.offset_encoding);
+    const new_text = try diff.applyContentChanges(
+        handle.*.impl.allocator,
+        handle.text,
+        notification.contentChanges,
+        server.offset_encoding,
+    );
 
     if (new_text.len > DocumentStore.max_document_size) {
         log.err("change document '{s}' failed: text size ({d}) is above maximum length ({d})", .{
@@ -1360,11 +1365,12 @@ fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: ty
         const job: Job = .{
             .generate_ast = .{
                 .uri = try server.allocator.dupe(u8, handle.uri),
+                .text = new_text,
                 .version = notification.textDocument.version,
             },
         };
         errdefer job.deinit(server.allocator);
-        try server.thread_pool2.spawn(processJob, .{ server, job, null });
+        try server.thread_pool.spawn(processJob, .{ server, job, null });
     }
 
     std.log.debug("spawned genAst OK for version: {}", .{notification.textDocument.version});
@@ -1787,7 +1793,6 @@ pub fn create(allocator: std.mem.Allocator) !*Server {
         },
         .job_queue = std.fifo.LinearFifo(Job, .Dynamic).init(allocator),
         .thread_pool = undefined, // set below
-        .thread_pool2 = undefined, // set below
         .wait_group = if (zig_builtin.single_threaded) {} else .{},
     };
 
@@ -1796,11 +1801,7 @@ pub fn create(allocator: std.mem.Allocator) !*Server {
     } else {
         try server.thread_pool.init(.{
             .allocator = allocator,
-            .n_jobs = 4,
-        });
-        try server.thread_pool2.init(.{
-            .allocator = allocator,
-            .n_jobs = 4,
+            .n_jobs = (std.Thread.getCpuCount() catch 10) - 3,
         });
         server.document_store.thread_pool = &server.thread_pool;
     }
@@ -1814,7 +1815,6 @@ pub fn destroy(server: *Server) void {
     if (!zig_builtin.single_threaded) {
         server.wait_group.wait();
         server.thread_pool.deinit();
-        server.thread_pool2.deinit();
     }
 
     while (server.job_queue.readItem()) |job| job.deinit(server.allocator);
@@ -2050,27 +2050,19 @@ fn processJob(server: *Server, job: Job, wait_group: ?*std.Thread.WaitGroup) voi
         .generate_ast => |ver_uri| {
             const handle = server.document_store.getHandleUnsafe(ver_uri.uri) orelse return;
             std.log.debug("begin genAst for version: {}", .{ver_uri.version});
-            var new_ast = handle.*.genAst(ver_uri.version) catch return;
+            const new_ast = handle.*.genAst(ver_uri.version, ver_uri.text) catch return;
             std.log.debug("genAst OK for version: {}", .{ver_uri.version});
             const upd_ast_job: Job = .{
                 .update_ast = .{
-                    .uri = server.allocator.dupe(u8, handle.uri) catch {
-                        handle.*.impl.allocator.free(new_ast.source);
-                        new_ast.deinit(handle.*.impl.allocator);
-                        return;
-                    },
+                    .uri = server.allocator.dupe(u8, handle.uri) catch @panic("OOM"),
                     .version = ver_uri.version,
                     .ast = new_ast,
                 },
             };
-            server.thread_pool2.spawn(processJob, .{ server, upd_ast_job, null }) catch {
-                job.deinit(server.allocator);
-                handle.*.impl.allocator.free(new_ast.source);
-                new_ast.deinit(handle.*.impl.allocator);
-                return;
-            };
+            server.thread_pool.spawn(processJob, .{ server, upd_ast_job, null }) catch @panic("FAILED spawning a thread");
         },
         .update_ast => |uri_ast| {
+            // TODO Handle the file being closed => free the ast
             const handle = server.document_store.getHandleUnsafe(uri_ast.uri) orelse return;
             std.log.debug("begin updateAst", .{});
             handle.*.updateAst(uri_ast.ast, &server.document_store, uri_ast.version) catch return;
@@ -2078,7 +2070,7 @@ fn processJob(server: *Server, job: Job, wait_group: ?*std.Thread.WaitGroup) voi
             const gen_diag_job: Job = .{
                 .generate_diagnostics = server.allocator.dupe(u8, handle.uri) catch return,
             };
-            server.thread_pool2.spawn(processJob, .{ server, gen_diag_job, null }) catch return;
+            server.thread_pool.spawn(processJob, .{ server, gen_diag_job, null }) catch return;
             std.log.debug("update_ast spawn'd gen_diag", .{});
         },
         .run_build_on_save => {

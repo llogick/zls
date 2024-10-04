@@ -253,7 +253,12 @@ pub const Handle = struct {
         const duped_uri = try allocator.dupe(u8, uri);
         errdefer allocator.free(duped_uri);
 
-        const tree = try parseTree(@ptrFromInt(0x10), allocator, text, 0);
+        const tree = try parseTree(
+            @ptrFromInt(0x10), // XXX Bad, but we don't have a *Handle (yet)
+            allocator,
+            text,
+            0,
+        );
 
         return .{
             .uri = duped_uri,
@@ -504,30 +509,32 @@ pub const Handle = struct {
         return tree;
     }
 
-    pub fn genAst(self: *Handle, version: i32) error{OutOfMemory}!Ast {
+    pub fn genAst(self: *Handle, version: i32, new_text: [:0]const u8) error{OutOfMemory}!Ast {
         const tracy_zone = tracy.trace(@src());
         defer tracy_zone.end();
 
         self.*.impl.lock.lock();
-        const working_text = self.impl.allocator.dupeZ(u8, self.text) catch |e| {
+        if (version != self.*.version) {
+            std.log.debug("skipping: {} vs {}", .{ version, self.*.version });
+            self.*.impl.allocator.free(new_text);
             self.*.impl.lock.unlock();
-            return e;
-        };
-        const current_version = self.*.version;
-        self.*.impl.lock.unlock();
-
-        if (version != current_version) {
-            std.log.debug("skipping: {} vs {}", .{ version, current_version });
-            self.*.impl.allocator.free(working_text);
             return error.OutOfMemory; // XXX error.Outdated
         }
+        // const working_text = self.impl.allocator.dupeZ(u8, self.text) catch |e| {
+        //     self.*.impl.lock.unlock();
+        //     return e;
+        // };
+        self.*.impl.lock.unlock();
 
-        return parseTree(self, self.impl.allocator, working_text, version);
+        return parseTree(self, self.impl.allocator, new_text, version);
     }
 
     pub fn updateAst(self: *Handle, new_tree: Ast, doc_store: *DocumentStore, ast_version: i32) error{OutOfMemory}!void {
         self.impl.lock.lock();
         if (self.ast_version > ast_version) {
+            var non_const_ast = new_tree;
+            self.*.impl.allocator.free(non_const_ast.source);
+            non_const_ast.deinit(self.*.impl.allocator);
             self.impl.lock.unlock();
             return error.OutOfMemory; // XXX error.Outdated
         }
@@ -538,30 +545,52 @@ pub const Handle = struct {
 
         const old_status: Handle.Status = @bitCast(self.impl.status.swap(@bitCast(new_status), .acq_rel));
 
+        // Sync up
+        // if (@intFromPtr(self.text.ptr) != @intFromPtr(new_tree.source.ptr)) {
+        //     self.*.impl.allocator.free(new_tree.source);
+        //     new_tree.source = self.*.text;
+        // }
+
         var old_tree = self.tree;
         var old_import_uris = self.import_uris;
         var old_cimports = self.cimports;
         var old_document_scope = if (old_status.has_document_scope) self.impl.document_scope else null;
         var old_zir = if (old_status.has_zir) self.impl.zir else null;
 
-        // TODO: defer free/deinit
+        // defer {
+        //     std.log.debug("oof: {*}", .{old_tree.source});
+        //     self.impl.allocator.free(old_tree.source);
+        //     old_tree.deinit(self.impl.allocator);
+
+        //     for (old_import_uris.items) |uri| self.impl.allocator.free(uri);
+        //     old_import_uris.deinit(self.impl.allocator);
+
+        //     for (old_cimports.items(.source)) |source| self.impl.allocator.free(source);
+        //     old_cimports.deinit(self.impl.allocator);
+
+        //     if (old_document_scope) |*document_scope| document_scope.deinit(self.impl.allocator);
+        //     if (old_zir) |*zir| zir.deinit(self.impl.allocator);
+        // }
 
         self.ast_version = ast_version;
         self.tree = new_tree;
+        // self.*.impl.allocator.free(new_tree.source);
+        // self.tree.source = self.*.text;
         self.impl.document_scope = undefined;
         self.impl.zir = undefined;
 
-        errdefer {
-            self.cimports.deinit(doc_store.allocator); // XXX check these allocators
-            self.impl.lock.unlock();
-        }
-        self.cimports = try collectCIncludes(doc_store.allocator, self.tree);
+        // errdefer {
+        //     self.cimports.deinit(doc_store.allocator); // XXX check these allocators
+        //     self.impl.lock.unlock();
+        // }
+        self.cimports = collectCIncludes(doc_store.allocator, self.tree) catch @panic("OOM");
 
         self.impl.lock.unlock();
 
-        errdefer self.import_uris.deinit(doc_store.allocator); // collectImportUris might need a refactor to use handle.impl.allocator
-        self.import_uris = try doc_store.collectImportUris(self); // XXX does it's own lock
+        // errdefer self.import_uris.deinit(doc_store.allocator); // collectImportUris might need a refactor to use handle.impl.allocator
+        self.import_uris = doc_store.collectImportUris(self) catch @panic("OOM"); // XXX does it's own lock
 
+        std.log.debug("oof: {*}", .{old_tree.source});
         self.impl.allocator.free(old_tree.source);
         old_tree.deinit(self.impl.allocator);
 
@@ -585,6 +614,8 @@ pub const Handle = struct {
 
         if (status.has_zir) self.impl.zir.deinit(allocator);
         if (status.has_document_scope) self.impl.document_scope.deinit(allocator);
+        std.log.debug("deinit: {s}", .{self.uri});
+        // if (@intFromPtr(self.text.ptr) != @intFromPtr(self.tree.source.ptr)) allocator.free(self.text);
         allocator.free(self.tree.source);
         self.tree.deinit(allocator);
         allocator.free(self.uri);
@@ -679,7 +710,10 @@ pub fn getOrLoadHandle(self: *DocumentStore, uri: Uri) ?*Handle {
         return null;
     };
 
-    return self.createAndStoreDocument(uri, file_contents, false) catch return null;
+    // return self.createAndStoreDocument(uri, file_contents, false) catch return null;
+    const hand = self.createAndStoreDocument(uri, file_contents, false) catch return null;
+    std.log.debug("hand: {s}, {*}", .{ hand.uri, hand.tree.source });
+    return hand;
 }
 
 /// **Thread safe** takes a shared lock
@@ -738,7 +772,9 @@ pub fn openDocument(self: *DocumentStore, tdi: lsp.types.TextDocumentItem) error
     }
 
     const duped_text = try self.allocator.dupeZ(u8, tdi.text);
-    _ = try self.createAndStoreDocument(tdi.uri, duped_text, true);
+    // _ = try self.createAndStoreDocument(tdi.uri, duped_text, true);
+    const hand = try self.createAndStoreDocument(tdi.uri, duped_text, true);
+    std.log.debug("hand: {*}", .{hand.tree.source});
 }
 
 /// **Thread safe** takes a shared lock, takes an exclusive lock (with `tryLock`)
@@ -785,6 +821,7 @@ pub fn refreshDocument(self: *DocumentStore, tdi: lsp.types.VersionedTextDocumen
 
     std.log.debug("new version: {}", .{tdi.version});
     // handle.*.impl.lock.lock();
+    // self.allocator.free(handle.*.text); //
     handle.*.text = new_text;
     handle.*.version = tdi.version;
     // handle.*.impl.lock.unlock();
@@ -1318,6 +1355,8 @@ fn createAndStoreDocument(self: *DocumentStore, uri: Uri, text: [:0]const u8, op
     } else {
         log.debug("Opened document '{s}'", .{gop.value_ptr.*.uri});
     }
+
+    std.log.debug("gop *: {}", .{gop.value_ptr.*});
 
     return gop.value_ptr.*;
 }
