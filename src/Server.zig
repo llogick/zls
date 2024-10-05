@@ -1326,7 +1326,8 @@ fn openDocumentHandler(server: *Server, _: std.mem.Allocator, notification: type
 fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: types.DidChangeTextDocumentParams) Error!void {
     const handle = server.document_store.getHandle(notification.textDocument.uri) orelse return;
 
-    const new_text = try diff.applyContentChanges(server.allocator, handle.tree.source, notification.contentChanges, server.offset_encoding);
+    const content_changes = try diff.applyContentChanges(server.allocator, handle.tree.source, notification.contentChanges, server.offset_encoding);
+    const new_text = content_changes.text;
 
     if (new_text.len > DocumentStore.max_document_size) {
         log.err("change document '{s}' failed: text size ({d}) is above maximum length ({d})", .{
@@ -1337,7 +1338,7 @@ fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: ty
         return error.InternalError;
     }
 
-    try server.document_store.refreshDocument(handle.uri, new_text);
+    try server.document_store.refreshDocument(handle.uri, new_text, content_changes.lowest_index);
 
     if (server.client_capabilities.supports_publish_diagnostics) {
         try server.pushJob(.{

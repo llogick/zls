@@ -66,13 +66,18 @@ pub fn edits(
     return eds;
 }
 
+pub const ContentChanges = struct {
+    text: [:0]const u8,
+    lowest_index: usize,
+};
+
 /// Caller owns returned memory.
 pub fn applyContentChanges(
     allocator: std.mem.Allocator,
     text: []const u8,
     content_changes: []const types.TextDocumentContentChangeEvent,
     encoding: offsets.Encoding,
-) error{OutOfMemory}![:0]const u8 {
+) error{OutOfMemory}!ContentChanges {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
@@ -96,15 +101,21 @@ pub fn applyContentChanges(
     // don't even bother applying changes before a full text change
     const changes = content_changes[if (last_full_text_index) |index| index + 1 else 0..];
 
+    var lowest_index: usize = last_full_text.len;
+
     for (changes) |item| {
         const content_change = item.literal_0; // TextDocumentContentChangePartial
 
         const start = offsets.positionToIndex(text_array.items, content_change.range.start, encoding);
+        if (start < lowest_index) lowest_index = start;
         const end = offsets.positionToIndex(text_array.items, content_change.range.end, encoding);
         try text_array.replaceRange(allocator, start, end - start, content_change.text);
     }
 
-    return try text_array.toOwnedSliceSentinel(allocator, 0);
+    return .{
+        .text = try text_array.toOwnedSliceSentinel(allocator, 0),
+        .lowest_index = lowest_index,
+    };
 }
 
 // https://cs.opensource.google/go/x/tools/+/master:internal/lsp/diff/diff.go;l=40

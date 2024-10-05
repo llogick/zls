@@ -495,7 +495,11 @@ pub const Handle = struct {
         return tree;
     }
 
-    fn setSource(self: *Handle, new_text: [:0]const u8) error{OutOfMemory}!void {
+    fn setSource(
+        self: *Handle,
+        new_text: [:0]const u8,
+        lowest_source_index: usize,
+    ) error{OutOfMemory}!void {
         const tracy_zone = tracy.trace(@src());
         defer tracy_zone.end();
 
@@ -503,7 +507,21 @@ pub const Handle = struct {
             .open = self.getStatus().open,
         };
 
-        const new_tree = try parseTree(self.impl.allocator, new_text);
+        var tok_i = offsets.sourceIndexToTokenIndex(self.tree, lowest_source_index);
+        while (tok_i > 0 and self.tree.tokens.items(.tag)[tok_i] == .invalid) tok_i -= 1;
+        tok_i -|= 1;
+        const start_source_index = if (tok_i == 0) 0 else self.tree.tokens.items(.start)[tok_i];
+        var tokens = try self.tree.tokens.toMultiArrayList().clone(self.*.impl.allocator);
+        tokens.len = tok_i;
+
+        const zls_ast = try Parser.parse2(self.impl.allocator, new_text, .zig, start_source_index, &tokens);
+        const new_tree = Ast{
+            .source = zls_ast.source,
+            .tokens = zls_ast.tokens,
+            .nodes = zls_ast.nodes,
+            .extra_data = zls_ast.extra_data,
+            .errors = zls_ast.errors,
+        };
 
         self.impl.lock.lock();
         errdefer @compileError("");
@@ -729,7 +747,7 @@ pub fn closeDocument(self: *DocumentStore, uri: Uri) void {
 ///
 /// **Thread safe** takes a shared lock when called on different documents
 /// **Not thread safe** when called on the same document
-pub fn refreshDocument(self: *DocumentStore, uri: Uri, new_text: [:0]const u8) !void {
+pub fn refreshDocument(self: *DocumentStore, uri: Uri, new_text: [:0]const u8, lowest_index: usize) !void {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
@@ -737,7 +755,7 @@ pub fn refreshDocument(self: *DocumentStore, uri: Uri, new_text: [:0]const u8) !
     if (!handle.getStatus().open) {
         log.warn("Document modified without being opened: {s}", .{uri});
     }
-    try handle.setSource(new_text);
+    try handle.setSource(new_text, lowest_index);
     handle.import_uris = try self.collectImportUris(handle);
     handle.cimports = try collectCIncludes(self.allocator, handle.tree);
 }

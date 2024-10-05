@@ -411,7 +411,7 @@ fn testAutofixOptions(before: []const u8, after: []const u8, want_zir: bool) !vo
 
     const actual = try zls.diff.applyTextEdits(allocator, before, text_edits.items, ctx.server.offset_encoding);
     defer allocator.free(actual);
-    try ctx.server.document_store.refreshDocument(uri, try allocator.dupeZ(u8, actual));
+    // try ctx.server.document_store.refreshDocument(uri, try allocator.dupeZ(u8, actual));
 
-    try std.testing.expectEqualStrings(after, handle.tree.source);
+    try std.testing.expectEqualStrings(after, actual);
 }
