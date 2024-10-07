@@ -16,6 +16,7 @@ const Zir = std.zig.Zir;
 const Parser = @import("stage2/Ast.zig");
 const InternPool = @import("analyser/InternPool.zig");
 const DocumentScope = @import("DocumentScope.zig");
+const ContentChanges = @import("diff.zig").ContentChanges;
 
 const DocumentStore = @This();
 
@@ -473,8 +474,10 @@ pub const Handle = struct {
         const tracy_zone_inner = tracy.traceNamed(@src(), "Ast.parse");
         defer tracy_zone_inner.end();
 
-        var zls_ast = try Parser.parse(allocator, new_text, .zig);
+        var zls_ast = try Parser.parse(allocator, new_text, .zig, .none);
+
         errdefer zls_ast.deinit(allocator);
+
         var tree = Ast{
             .source = zls_ast.source,
             .tokens = zls_ast.tokens,
@@ -497,30 +500,175 @@ pub const Handle = struct {
 
     fn setSource(
         self: *Handle,
-        new_text: [:0]const u8,
-        lowest_source_index: usize,
+        content_changes: ContentChanges,
     ) error{OutOfMemory}!void {
         const tracy_zone = tracy.trace(@src());
         defer tracy_zone.end();
+
+        const gpa = self.*.impl.allocator;
 
         const new_status = Handle.Status{
             .open = self.getStatus().open,
         };
 
-        var tok_i = offsets.sourceIndexToTokenIndex(self.tree, lowest_source_index);
-        while (tok_i > 0 and self.tree.tokens.items(.tag)[tok_i] == .invalid) tok_i -= 1;
-        tok_i -|= 1;
-        const start_source_index = if (tok_i == 0) 0 else self.tree.tokens.items(.start)[tok_i];
-        var tokens = try self.tree.tokens.toMultiArrayList().clone(self.*.impl.allocator);
-        tokens.len = tok_i;
+        const new_tree: Ast = new_tree: {
+            const existing_tokens: Parser.ExistingTokens = et: {
+                const tok_starts = self.tree.tokens.items(.start);
+                const tok_tags = self.tree.tokens.items(.tag);
 
-        const zls_ast = try Parser.parse2(self.impl.allocator, new_text, .zig, start_source_index, &tokens);
-        const new_tree = Ast{
-            .source = zls_ast.source,
-            .tokens = zls_ast.tokens,
-            .nodes = zls_ast.nodes,
-            .extra_data = zls_ast.extra_data,
-            .errors = zls_ast.errors,
+                var tok_i = offsets.sourceIndexToTokenIndex(self.tree, content_changes.idx_lo);
+
+                // Doc comments $#^@$
+                // Have ample room in case a broken doc comment got tokenized, eg
+                // /
+                // /! many words that are tokenized as identifiers and also can be valid keywords ...
+                if (tok_i < 100) tok_i = 0 else tok_i -= 50;
+
+                while (tok_i != 0 and switch (tok_tags[tok_i]) {
+                    .invalid,
+                    .number_literal,
+                    => true,
+                    else => false,
+                }) tok_i -= 1;
+
+                // Have at least N bytes of text -- not worth doing .full if less + enforces bounds safety
+                if ((content_changes.idx_hi <= content_changes.idx_lo) or
+                    !(content_changes.idx_hi < (content_changes.text.len - 20)))
+                {
+                    var tokens = try self.tree.tokens.toMultiArrayList().clone(gpa);
+                    tokens.len = tok_i;
+
+                    break :et .{
+                        .some = .{
+                            .tokens = &tokens,
+                            .start_source_index = if (tok_i == 0) 0 else tok_starts[tok_i],
+                        },
+                    };
+                }
+
+                var upper_tok_i = offsets.sourceIndexToTokenIndex(self.tree, content_changes.idx_hi);
+
+                // See "Doc comments" above
+                // NB: tok_tags.len - 2 to get the .eof in so it gets copied
+                if (upper_tok_i < tok_tags.len - 52) upper_tok_i += 50 else upper_tok_i = @intCast(tok_tags.len - 2);
+
+                while ((upper_tok_i != tok_tags.len - 1) and switch (tok_tags[upper_tok_i]) {
+                    .invalid,
+                    .number_literal,
+                    => true,
+                    else => false,
+                }) upper_tok_i += 1;
+
+                const upper_source_index = tok_starts[upper_tok_i];
+
+                var new_tokens = std.zig.Ast.TokenList{};
+                try new_tokens.ensureTotalCapacity(gpa, tok_tags.len);
+                errdefer new_tokens.deinit(gpa);
+
+                // Add existing tokens
+                for (
+                    tok_starts[0..tok_i],
+                    tok_tags[0..tok_i],
+                    // 0..,
+                ) |
+                    start,
+                    tag,
+                    // idx,
+                | {
+                    // std.log.debug("copying: {}: {}, {}", .{ idx, start, tag });
+                    try new_tokens.append(gpa, .{ .start = start, .tag = tag });
+                }
+
+                // Add new tokens
+                const text = content_changes.text;
+
+                // do delta
+                const delta: struct {
+                    op: enum {
+                        add,
+                        sub,
+                    },
+                    value: u32,
+                } = if (text.len > self.tree.source.len) .{
+                    .op = .add,
+                    .value = @intCast(text.len - self.tree.source.len),
+                } else .{
+                    .op = .sub,
+                    .value = @intCast(self.tree.source.len - text.len),
+                };
+
+                const start_source_index = if (tok_i == 0) 0 else offsets.tokenToLoc(self.tree, tok_i - 1).end;
+
+                // std.log.debug("ssi: `{c}`", .{text[start_source_index]});
+
+                // std.log.debug(
+                //     \\
+                //     \\tok.i:{} {}
+                //     \\old.len  {}
+                //     \\new.len  {}
+                //     \\dlt.val  {}
+                //     \\low.ind  {}
+                //     \\hgh.ind  {}
+                // , .{
+                //     tok_i,
+                //     tok_tags[tok_i],
+                //     self.tree.source.len,
+                //     text.len,
+                //     delta.value,
+                //     start_source_index,
+                //     upper_source_index,
+                // });
+
+                var tokenizer: std.zig.Tokenizer = .{
+                    .buffer = text,
+                    .index = start_source_index,
+                };
+
+                while (true) {
+                    const token = tokenizer.next();
+                    if (token.tag == .eof) break;
+                    // std.log.debug("newtok: {}", .{token});
+                    // std.log.debug("adding: {}", .{token});
+                    try new_tokens.append(gpa, .{
+                        .tag = token.tag,
+                        .start = @as(u32, @intCast(token.loc.start)),
+                    });
+                    if ((token.loc.start == switch (delta.op) {
+                        .add => upper_source_index + delta.value,
+                        .sub => upper_source_index - delta.value,
+                    })) break;
+                }
+
+                // text[upper_source_index] = saved_char;
+
+                // Add the rest of the existing tokens
+                for (tok_starts[upper_tok_i + 1 ..], tok_tags[upper_tok_i + 1 ..]) |start, tag| {
+                    // std.log.debug("copying2: {}, {}", .{ start, tag });
+                    const new_start: u32 = switch (delta.op) {
+                        .add => start + delta.value,
+                        .sub => start - delta.value,
+                    };
+                    // std.log.debug("new_start: {}", .{new_start});
+                    try new_tokens.append(gpa, .{ .start = @intCast(new_start), .tag = tag });
+                }
+
+                break :et .{ .full = &new_tokens };
+            };
+
+            const zls_ast = try Parser.parse(
+                self.impl.allocator,
+                content_changes.text,
+                .zig,
+                existing_tokens,
+            );
+
+            break :new_tree .{ // TODO make completions work here
+                .source = zls_ast.source,
+                .tokens = zls_ast.tokens,
+                .nodes = zls_ast.nodes,
+                .extra_data = zls_ast.extra_data,
+                .errors = zls_ast.errors,
+            };
         };
 
         self.impl.lock.lock();
@@ -747,15 +895,14 @@ pub fn closeDocument(self: *DocumentStore, uri: Uri) void {
 ///
 /// **Thread safe** takes a shared lock when called on different documents
 /// **Not thread safe** when called on the same document
-pub fn refreshDocument(self: *DocumentStore, uri: Uri, new_text: [:0]const u8, lowest_index: usize) !void {
+pub fn refreshDocument(self: *DocumentStore, handle: *Handle, content_changes: ContentChanges) !void {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
-    const handle = self.getHandle(uri).?;
     if (!handle.getStatus().open) {
-        log.warn("Document modified without being opened: {s}", .{uri});
+        log.warn("Document modified without being opened: {s}", .{handle.uri});
     }
-    try handle.setSource(new_text, lowest_index);
+    try handle.setSource(content_changes);
     handle.import_uris = try self.collectImportUris(handle);
     handle.cimports = try collectCIncludes(self.allocator, handle.tree);
 }

@@ -1334,7 +1334,7 @@ fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: ty
         return error.InternalError;
     }
 
-    try server.document_store.refreshDocument(handle.uri, new_text, content_changes.lowest_index);
+    try server.document_store.refreshDocument(handle, content_changes);
 
     if (server.client_capabilities.supports_publish_diagnostics) {
         try server.pushJob(.{

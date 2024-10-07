@@ -25,90 +25,48 @@ pub fn deinit(tree: *Ast, gpa: Allocator) void {
 
 pub const Mode = enum { zig, zon };
 
-/// Result should be freed with tree.deinit() when there are
-/// no more references to any of the tokens or nodes.
-pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!Ast {
-    var tokens = std.zig.Ast.TokenList{};
-    defer tokens.deinit(gpa);
-
-    // Empirically, the zig std lib has an 8:1 ratio of source bytes to token count.
-    const estimated_token_count = source.len / 8;
-    try tokens.ensureTotalCapacity(gpa, estimated_token_count);
-
-    var tokenizer = std.zig.Tokenizer.init(source);
-    while (true) {
-        const token = tokenizer.next();
-        try tokens.append(gpa, .{
-            .tag = token.tag,
-            .start = @as(u32, @intCast(token.loc.start)),
-        });
-        if (token.tag == .eof) break;
-    }
-
-    var parser: Parse = .{
-        .source = source,
-        .gpa = gpa,
-        .token_tags = tokens.items(.tag),
-        .token_starts = tokens.items(.start),
-        .errors = .{},
-        .nodes = .{},
-        .extra_data = .{},
-        .scratch = .{},
-        .tok_i = 0,
-    };
-    defer parser.errors.deinit(gpa);
-    defer parser.nodes.deinit(gpa);
-    defer parser.extra_data.deinit(gpa);
-    defer parser.scratch.deinit(gpa);
-
-    // Empirically, Zig source code has a 2:1 ratio of tokens to AST nodes.
-    // Make sure at least 1 so we can use appendAssumeCapacity on the root node below.
-    const estimated_node_count = (tokens.len + 2) / 2;
-    try parser.nodes.ensureTotalCapacity(gpa, estimated_node_count);
-
-    switch (mode) {
-        .zig => try parser.parseRoot(),
-        .zon => try parser.parseZon(),
-    }
-
-    // TODO experiment with compacting the MultiArrayList slices here
-    return Ast{
-        .source = source,
-        .tokens = tokens.toOwnedSlice(),
-        .nodes = parser.nodes.toOwnedSlice(),
-        .extra_data = try parser.extra_data.toOwnedSlice(gpa),
-        .errors = try parser.errors.toOwnedSlice(gpa),
-    };
-}
+pub const ExistingTokens = union(enum) {
+    none,
+    full: *std.zig.Ast.TokenList,
+    some: struct {
+        tokens: *std.zig.Ast.TokenList,
+        start_source_index: usize,
+    },
+};
 
 /// Result should be freed with tree.deinit() when there are
 /// no more references to any of the tokens or nodes.
-pub fn parse2(
+pub fn parse(
     gpa: Allocator,
     source: [:0]const u8,
     mode: Mode,
-    start_source_index: usize,
-    existing_tokens: *std.zig.Ast.TokenList,
+    existing_tokens: ExistingTokens,
 ) Allocator.Error!Ast {
-    var tokens = existing_tokens.*;
+    var tokens, const src_idx = switch (existing_tokens) {
+        .none => .{ std.zig.Ast.TokenList{}, 0 },
+        .full => .{ existing_tokens.full.*, 0 },
+        .some => .{ existing_tokens.some.tokens.*, existing_tokens.some.start_source_index },
+    };
     defer tokens.deinit(gpa);
 
-    // Empirically, the zig std lib has an 8:1 ratio of source bytes to token count.
-    const estimated_token_count = source.len / 8;
-    try tokens.ensureTotalCapacity(gpa, estimated_token_count);
+    if (existing_tokens != .full) {
+        // Empirically, the zig std lib has an 8:1 ratio of source bytes to token count.
+        const estimated_token_count = source.len / 8;
+        try tokens.ensureTotalCapacity(gpa, estimated_token_count);
 
-    var tokenizer: std.zig.Tokenizer = .{
-        .buffer = source,
-        .index = start_source_index,
-    };
+        var tokenizer: std.zig.Tokenizer = .{
+            .buffer = source,
+            .index = src_idx,
+        };
 
-    while (true) {
-        const token = tokenizer.next();
-        try tokens.append(gpa, .{
-            .tag = token.tag,
-            .start = @as(u32, @intCast(token.loc.start)),
-        });
-        if (token.tag == .eof) break;
+        while (true) {
+            const token = tokenizer.next();
+            try tokens.append(gpa, .{
+                .tag = token.tag,
+                .start = @as(u32, @intCast(token.loc.start)),
+            });
+            if (token.tag == .eof) break;
+        }
     }
 
     var parser: Parse = .{

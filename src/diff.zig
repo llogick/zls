@@ -67,8 +67,12 @@ pub fn edits(
 }
 
 pub const ContentChanges = struct {
+    /// New contents
     text: [:0]const u8,
-    lowest_index: usize,
+    /// Lowest index affected by the change(s)
+    idx_lo: usize,
+    /// Highest index affected by the change(s)
+    idx_hi: usize,
 };
 
 /// Caller owns returned memory.
@@ -101,20 +105,35 @@ pub fn applyContentChanges(
     // don't even bother applying changes before a full text change
     const changes = content_changes[if (last_full_text_index) |index| index + 1 else 0..];
 
-    var lowest_index: usize = last_full_text.len;
+    // lowest and highest indexes affected by the change(s)
+    var idx_lo: usize = last_full_text.len;
+    var idx_hi: usize = 0;
 
     for (changes) |item| {
         const content_change = item.literal_0; // TextDocumentContentChangePartial
 
-        const start = offsets.positionToIndex(text_array.items, content_change.range.start, encoding);
-        if (start < lowest_index) lowest_index = start;
-        const end = offsets.positionToIndex(text_array.items, content_change.range.end, encoding);
-        try text_array.replaceRange(allocator, start, end - start, content_change.text);
+        const head = offsets.positionToIndex(
+            text_array.items,
+            content_change.range.start,
+            encoding,
+        );
+        if (head < idx_lo) idx_lo = head;
+
+        const tail = offsets.positionToIndex(
+            text_array.items,
+            content_change.range.end,
+            encoding,
+        );
+        const upper_index = @max(tail, head + content_change.text.len);
+        if (idx_hi < upper_index) idx_hi = upper_index;
+
+        try text_array.replaceRange(allocator, head, tail - head, content_change.text);
     }
 
     return .{
         .text = try text_array.toOwnedSliceSentinel(allocator, 0),
-        .lowest_index = lowest_index,
+        .idx_lo = idx_lo,
+        .idx_hi = idx_hi,
     };
 }
 
