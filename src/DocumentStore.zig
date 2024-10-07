@@ -533,6 +533,8 @@ pub const Handle = struct {
 
                 // Have at least N bytes of text -- not worth doing .full if less + enforces bounds safety
                 if ((content_changes.idx_hi <= content_changes.idx_lo) or
+                    (content_changes.text.len < 150) or
+                    (tok_tags.len < 300) or
                     !(content_changes.idx_hi < (content_changes.text.len - 20)))
                 {
                     var tokens = try self.tree.tokens.toMultiArrayList().clone(gpa);
@@ -565,19 +567,23 @@ pub const Handle = struct {
                 try new_tokens.ensureTotalCapacity(gpa, tok_tags.len);
                 errdefer new_tokens.deinit(gpa);
 
-                // Add existing tokens
-                for (
-                    tok_starts[0..tok_i],
-                    tok_tags[0..tok_i],
-                    // 0..,
-                ) |
-                    start,
-                    tag,
-                    // idx,
-                | {
-                    // std.log.debug("copying: {}: {}, {}", .{ idx, start, tag });
-                    try new_tokens.append(gpa, .{ .start = start, .tag = tag });
-                }
+                new_tokens.len = tok_i;
+                @memcpy(new_tokens.items(.start)[0..tok_i], tok_starts[0..tok_i]);
+                @memcpy(new_tokens.items(.tag)[0..tok_i], tok_tags[0..tok_i]);
+
+                // // Add existing tokens
+                // for (
+                //     tok_starts[0..tok_i],
+                //     tok_tags[0..tok_i],
+                //     // 0..,
+                // ) |
+                //     start,
+                //     tag,
+                //     // idx,
+                // | {
+                //     // std.log.debug("copying: {}: {}, {}", .{ idx, start, tag });
+                //     try new_tokens.append(gpa, .{ .start = start, .tag = tag });
+                // }
 
                 // Add new tokens
                 const text = content_changes.text;
@@ -626,31 +632,55 @@ pub const Handle = struct {
 
                 while (true) {
                     const token = tokenizer.next();
-                    if (token.tag == .eof) break;
                     // std.log.debug("newtok: {}", .{token});
                     // std.log.debug("adding: {}", .{token});
-                    try new_tokens.append(gpa, .{
-                        .tag = token.tag,
-                        .start = @as(u32, @intCast(token.loc.start)),
-                    });
                     if ((token.loc.start == switch (delta.op) {
                         .add => upper_source_index + delta.value,
                         .sub => upper_source_index - delta.value,
                     })) break;
+                    try new_tokens.append(gpa, .{
+                        .tag = token.tag,
+                        .start = @as(u32, @intCast(token.loc.start)),
+                    });
                 }
 
-                // text[upper_source_index] = saved_char;
+                const cnti = new_tokens.len;
+                const num_to_copy = tok_tags.len - upper_tok_i;
+
+                try new_tokens.ensureTotalCapacity(gpa, new_tokens.capacity + num_to_copy);
+                new_tokens.len += num_to_copy;
+                // std.log.debug(
+                //     \\
+                //     \\ntl: {} vs ttl {}
+                //     \\slc: {} vs slc {}
+                // , .{
+                //     new_tokens.len,
+                //     tok_starts.len,
+                //     new_tokens.len - cnti,
+                //     tok_tags.len - upper_tok_i,
+                // });
+
+                @memcpy(new_tokens.items(.start)[cnti..], tok_starts[upper_tok_i..]);
+                @memcpy(new_tokens.items(.tag)[cnti..], tok_tags[upper_tok_i..]);
+
+                for (new_tokens.items(.start)[cnti..]) |*start| {
+                    const new_start: u32 = switch (delta.op) {
+                        .add => start.* + delta.value,
+                        .sub => start.* - delta.value,
+                    };
+                    start.* = new_start;
+                }
 
                 // Add the rest of the existing tokens
-                for (tok_starts[upper_tok_i + 1 ..], tok_tags[upper_tok_i + 1 ..]) |start, tag| {
-                    // std.log.debug("copying2: {}, {}", .{ start, tag });
-                    const new_start: u32 = switch (delta.op) {
-                        .add => start + delta.value,
-                        .sub => start - delta.value,
-                    };
-                    // std.log.debug("new_start: {}", .{new_start});
-                    try new_tokens.append(gpa, .{ .start = @intCast(new_start), .tag = tag });
-                }
+                // for (tok_starts[upper_tok_i + 1 ..], tok_tags[upper_tok_i + 1 ..]) |start, tag| {
+                //     // std.log.debug("copying2: {}, {}", .{ start, tag });
+                //     const new_start: u32 = switch (delta.op) {
+                //         .add => start + delta.value,
+                //         .sub => start - delta.value,
+                //     };
+                //     // std.log.debug("new_start: {}", .{new_start});
+                //     new_tokens.appendAssumeCapacity(.{ .start = @intCast(new_start), .tag = tag });
+                // }
 
                 break :et .{ .full = &new_tokens };
             };
