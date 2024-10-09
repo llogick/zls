@@ -11,6 +11,14 @@ errors: std.ArrayListUnmanaged(AstError),
 nodes: Ast.NodeList,
 extra_data: std.ArrayListUnmanaged(Node.Index),
 scratch: std.ArrayListUnmanaged(Node.Index),
+nstates: States,
+
+pub const State = struct {
+    nodes_len: usize,
+    xdata_len: usize,
+    token_ind: u32,
+};
+pub const States = std.AutoArrayHashMapUnmanaged(u32, State);
 
 const SmallSpan = union(enum) {
     zero_or_one: Node.Index,
@@ -168,7 +176,7 @@ pub fn parseRoot(p: *Parse) !void {
         .main_token = 0,
         .data = undefined,
     });
-    const root_members = try p.parseContainerMembers();
+    const root_members = try p.parseRootContainerMembers();
     const root_decls = try root_members.toSpan(p);
     if (p.token_tags[p.tok_i] != .eof) {
         try p.warnExpected(.eof);
@@ -203,6 +211,317 @@ pub fn parseZon(p: *Parse) !void {
         .lhs = node_index,
         .rhs = undefined,
     };
+}
+
+/// ContainerMembers <- ContainerDeclaration* (ContainerField COMMA)* (ContainerField / ContainerDeclaration*)
+///
+/// ContainerDeclaration <- TestDecl / ComptimeDecl / doc_comment? KEYWORD_pub? Decl
+///
+/// ComptimeDecl <- KEYWORD_comptime Block
+fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members { // zigsy
+    var scratch_top: usize = 0; //p.scratch.items.len;
+    // defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+    var field_state: union(enum) {
+        /// No fields have been seen.
+        none,
+        /// Currently parsing fields.
+        seen,
+        /// Saw fields and then a declaration after them.
+        /// Payload is first token of previous declaration.
+        end: Node.Index,
+        /// There was a declaration between fields, don't report more errors.
+        err,
+    } = .none;
+
+    var last_field: TokenIndex = undefined;
+
+    // Skip container doc comments.
+    while (p.eatToken(.container_doc_comment)) |_| {}
+
+    var trailing = false;
+    while (true) {
+        defer {
+            if (p.scratch.items.len != 0) {
+                // std.log.debug(
+                //     \\
+                //     \\tok_i: {} tag {}
+                //     \\nodes     len {}
+                //     \\xdata     len {}
+                //     \\scratch   len {}
+                //     \\scratch   itm {}
+                // , .{
+                //     p.tok_i,
+                //     p.token_tags[p.tok_i],
+                //     p.nodes.len,
+                //     p.extra_data.items.len,
+                //     p.scratch.items.len,
+                //     if (p.scratch.items.len == 0) 9999999 else p.scratch.items[p.scratch.items.len - 1],
+                // });
+                // std.log.debug("pn1: {}", .{p.nstates});
+                // std.log.debug("sitems: {any}", .{p.scratch.items});
+                // std.log.debug("checking: {}", .{p.scratch.items[p.scratch.items.len - scratch_top - 1]});
+                // const value = p.scratch.items[p.scratch.items.len - scratch_top - 1];
+                for (p.scratch.items[scratch_top..]) |value| {
+                    const gop_result = p.nstates.getOrPut(
+                        p.gpa,
+                        value,
+                    ) catch @panic("OOM");
+                    if (gop_result.found_existing) {
+                        // std.log.debug("Dup node: {}\nprev vals: {any}", .{ value, gop_result.value_ptr.* });
+                        continue;
+                    }
+                    gop_result.value_ptr.* = .{
+                        .nodes_len = p.nodes.len,
+                        .xdata_len = p.extra_data.items.len,
+                        .token_ind = p.tok_i,
+                    };
+                    // std.log.debug("stored: {}, tag: {}", .{ value, p.nodes.items(.tag)[value] });
+                }
+                scratch_top = p.scratch.items.len;
+            }
+        }
+        const doc_comment = try p.eatDocComments();
+
+        switch (p.token_tags[p.tok_i]) {
+            .keyword_test => {
+                if (doc_comment) |some| {
+                    try p.warnMsg(.{ .tag = .test_doc_comment, .token = some });
+                }
+                const test_decl_node = try p.expectTestDeclRecoverable();
+                if (test_decl_node != 0) {
+                    if (field_state == .seen) {
+                        field_state = .{ .end = test_decl_node };
+                    }
+                    try p.scratch.append(p.gpa, test_decl_node);
+                }
+                trailing = false;
+            },
+            .keyword_comptime => switch (p.token_tags[p.tok_i + 1]) {
+                .l_brace => {
+                    if (doc_comment) |some| {
+                        try p.warnMsg(.{ .tag = .comptime_doc_comment, .token = some });
+                    }
+                    const comptime_token = p.nextToken();
+                    const block = p.parseBlock() catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.ParseError => blk: {
+                            p.findNextContainerMember();
+                            break :blk null_node;
+                        },
+                    };
+                    if (block != 0) {
+                        const comptime_node = try p.addNode(.{
+                            .tag = .@"comptime",
+                            .main_token = comptime_token,
+                            .data = .{
+                                .lhs = block,
+                                .rhs = undefined,
+                            },
+                        });
+                        if (field_state == .seen) {
+                            field_state = .{ .end = comptime_node };
+                        }
+                        try p.scratch.append(p.gpa, comptime_node);
+                    }
+                    trailing = false;
+                },
+                else => {
+                    const identifier = p.tok_i;
+                    defer last_field = identifier;
+                    const container_field = p.expectContainerField() catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.ParseError => {
+                            p.findNextContainerMember();
+                            continue;
+                        },
+                    };
+                    switch (field_state) {
+                        .none => field_state = .seen,
+                        .err, .seen => {},
+                        .end => |node| {
+                            try p.warnMsg(.{
+                                .tag = .decl_between_fields,
+                                .token = p.nodes.items(.main_token)[node],
+                            });
+                            try p.warnMsg(.{
+                                .tag = .previous_field,
+                                .is_note = true,
+                                .token = last_field,
+                            });
+                            try p.warnMsg(.{
+                                .tag = .next_field,
+                                .is_note = true,
+                                .token = identifier,
+                            });
+                            // Continue parsing; error will be reported later.
+                            field_state = .err;
+                        },
+                    }
+                    try p.scratch.append(p.gpa, container_field);
+                    switch (p.token_tags[p.tok_i]) {
+                        .comma => {
+                            p.tok_i += 1;
+                            trailing = true;
+                            continue;
+                        },
+                        .r_brace, .eof => {
+                            trailing = false;
+                            break;
+                        },
+                        else => {},
+                    }
+                    // There is not allowed to be a decl after a field with no comma.
+                    // Report error but recover parser.
+                    try p.warn(.expected_comma_after_field);
+                    p.findNextContainerMember();
+                },
+            },
+            .keyword_pub => {
+                p.tok_i += 1;
+                const top_level_decl = try p.expectTopLevelDeclRecoverable();
+                if (top_level_decl != 0) {
+                    if (field_state == .seen) {
+                        field_state = .{ .end = top_level_decl };
+                    }
+                    try p.scratch.append(p.gpa, top_level_decl);
+                }
+                trailing = p.token_tags[p.tok_i - 1] == .semicolon;
+            },
+            .keyword_usingnamespace => {
+                const node = try p.expectUsingNamespaceRecoverable();
+                if (node != 0) {
+                    if (field_state == .seen) {
+                        field_state = .{ .end = node };
+                    }
+                    try p.scratch.append(p.gpa, node);
+                }
+                trailing = p.token_tags[p.tok_i - 1] == .semicolon;
+            },
+            .keyword_const,
+            .keyword_var,
+            .keyword_threadlocal,
+            .keyword_export,
+            .keyword_extern,
+            .keyword_inline,
+            .keyword_noinline,
+            .keyword_fn,
+            => {
+                const top_level_decl = try p.expectTopLevelDeclRecoverable();
+                if (top_level_decl != 0) {
+                    if (field_state == .seen) {
+                        field_state = .{ .end = top_level_decl };
+                    }
+                    try p.scratch.append(p.gpa, top_level_decl);
+                }
+                trailing = p.token_tags[p.tok_i - 1] == .semicolon;
+            },
+            .eof, .r_brace => {
+                if (doc_comment) |tok| {
+                    try p.warnMsg(.{
+                        .tag = .unattached_doc_comment,
+                        .token = tok,
+                    });
+                }
+                break;
+            },
+            else => {
+                const c_container = p.parseCStyleContainer() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.ParseError => false,
+                };
+                if (c_container) continue;
+
+                const identifier = p.tok_i;
+                defer last_field = identifier;
+                const container_field = p.expectContainerField() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.ParseError => {
+                        p.findNextContainerMember();
+                        continue;
+                    },
+                };
+                switch (field_state) {
+                    .none => field_state = .seen,
+                    .err, .seen => {},
+                    .end => |node| {
+                        try p.warnMsg(.{
+                            .tag = .decl_between_fields,
+                            .token = p.nodes.items(.main_token)[node],
+                        });
+                        try p.warnMsg(.{
+                            .tag = .previous_field,
+                            .is_note = true,
+                            .token = last_field,
+                        });
+                        try p.warnMsg(.{
+                            .tag = .next_field,
+                            .is_note = true,
+                            .token = identifier,
+                        });
+                        // Continue parsing; error will be reported later.
+                        field_state = .err;
+                    },
+                }
+                try p.scratch.append(p.gpa, container_field);
+                switch (p.token_tags[p.tok_i]) {
+                    .comma => {
+                        p.tok_i += 1;
+                        trailing = true;
+                        continue;
+                    },
+                    .r_brace, .eof => {
+                        trailing = false;
+                        break;
+                    },
+                    else => {},
+                }
+                // There is not allowed to be a decl after a field with no comma.
+                // Report error but recover parser.
+                try p.warn(.expected_comma_after_field);
+                if (p.token_tags[p.tok_i] == .semicolon and p.token_tags[identifier] == .identifier) {
+                    try p.warnMsg(.{
+                        .tag = .var_const_decl,
+                        .is_note = true,
+                        .token = identifier,
+                    });
+                }
+                p.findNextContainerMember();
+                continue;
+            },
+        }
+    }
+
+    const items = p.scratch.items[0..];
+    switch (items.len) {
+        0 => return Members{
+            .len = 0,
+            .lhs = 0,
+            .rhs = 0,
+            .trailing = trailing,
+        },
+        1 => return Members{
+            .len = 1,
+            .lhs = items[0],
+            .rhs = 0,
+            .trailing = trailing,
+        },
+        2 => return Members{
+            .len = 2,
+            .lhs = items[0],
+            .rhs = items[1],
+            .trailing = trailing,
+        },
+        else => {
+            const span = try p.listToSpan(items);
+            return Members{
+                .len = items.len,
+                .lhs = span.start,
+                .rhs = span.end,
+                .trailing = trailing,
+            };
+        },
+    }
 }
 
 /// ContainerMembers <- ContainerDeclaration* (ContainerField COMMA)* (ContainerField / ContainerDeclaration*)

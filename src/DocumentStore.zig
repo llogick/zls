@@ -13,7 +13,7 @@ const tracy = @import("tracy");
 const translate_c = @import("translate_c.zig");
 const AstGen = std.zig.AstGen;
 const Zir = std.zig.Zir;
-const Parser = @import("stage2/Ast.zig");
+const CustomAst = @import("stage2/Ast.zig");
 const InternPool = @import("analyser/InternPool.zig");
 const DocumentScope = @import("DocumentScope.zig");
 const ContentChanges = @import("diff.zig").ContentChanges;
@@ -178,6 +178,8 @@ pub const BuildFile = struct {
 pub const Handle = struct {
     uri: Uri,
     tree: Ast,
+    // Owned by `tree`
+    tree_nstates: CustomAst.States,
     /// Contains one entry for every import in the document
     import_uris: std.ArrayListUnmanaged(Uri) = .{},
     /// Contains one entry for every cimport in the document
@@ -250,12 +252,27 @@ pub const Handle = struct {
         const duped_uri = try allocator.dupe(u8, uri);
         errdefer allocator.free(duped_uri);
 
-        const tree = try parseTree(allocator, text);
-        errdefer tree.deinit(allocator);
+        var custom_ast = try CustomAst.parse(
+            allocator,
+            text,
+            .zig,
+            .{},
+        );
+
+        errdefer custom_ast.deinit(allocator);
+
+        const ast = Ast{
+            .source = custom_ast.source,
+            .tokens = custom_ast.tokens,
+            .nodes = custom_ast.nodes,
+            .extra_data = custom_ast.extra_data,
+            .errors = custom_ast.errors,
+        };
 
         return .{
             .uri = duped_uri,
-            .tree = tree,
+            .tree = ast,
+            .tree_nstates = custom_ast.nstates,
             .impl = .{
                 .allocator = allocator,
             },
@@ -474,16 +491,21 @@ pub const Handle = struct {
         const tracy_zone_inner = tracy.traceNamed(@src(), "Ast.parse");
         defer tracy_zone_inner.end();
 
-        var zls_ast = try Parser.parse(allocator, new_text, .zig, .none);
+        var custom_ast = try CustomAst.parse(
+            allocator,
+            new_text,
+            .zig,
+            .{},
+        );
 
-        errdefer zls_ast.deinit(allocator);
+        errdefer custom_ast.deinit(allocator);
 
         var tree = Ast{
-            .source = zls_ast.source,
-            .tokens = zls_ast.tokens,
-            .nodes = zls_ast.nodes,
-            .extra_data = zls_ast.extra_data,
-            .errors = zls_ast.errors,
+            .source = custom_ast.source,
+            .tokens = custom_ast.tokens,
+            .nodes = custom_ast.nodes,
+            .extra_data = custom_ast.extra_data,
+            .errors = custom_ast.errors,
         };
 
         // remove unused capacity
@@ -511,8 +533,8 @@ pub const Handle = struct {
             .open = self.getStatus().open,
         };
 
-        const new_tree: Ast = new_tree: {
-            const existing_tokens: Parser.ExistingTokens = et: {
+        const custom_ast: CustomAst = custom_ast: {
+            const reusable_data: CustomAst.ReusableData = reuse: {
                 const tok_starts = self.tree.tokens.items(.start);
                 const tok_tags = self.tree.tokens.items(.tag);
 
@@ -540,11 +562,14 @@ pub const Handle = struct {
                     var tokens = try self.tree.tokens.toMultiArrayList().clone(gpa);
                     tokens.len = tok_i;
 
-                    break :et .{
-                        .some = .{
-                            .tokens = &tokens,
-                            .start_source_index = if (tok_i == 0) 0 else tok_starts[tok_i],
+                    break :reuse .{
+                        .tokens = .{
+                            .some = .{
+                                .tokens = &tokens,
+                                .start_source_index = if (tok_i == 0) 0 else tok_starts[tok_i],
+                            },
                         },
+                        .nodes = .none,
                     };
                 }
 
@@ -682,23 +707,89 @@ pub const Handle = struct {
                 //     new_tokens.appendAssumeCapacity(.{ .start = @intCast(new_start), .tag = tag });
                 // }
 
-                break :et .{ .full = &new_tokens };
+                var nodes: CustomAst.ReusableNodes = .none;
+                // var modified_node_idx: ?u32 = null;
+                // std.log.debug("root decls: {any}", .{self.tree.rootDecls()});
+                // std.log.debug("nstates   : {any}", .{self.tree_nstates.keys()});
+                const root_decls = self.tree.rootDecls();
+                for (root_decls, 0..) |root_decl, idx| {
+                    const node_loc = offsets.nodeToLoc(self.tree, root_decl);
+                    // std.log.debug("rd.id: {}\nrd.loc: {}\n=========\n{s}\n=========\n", .{ root_decl, node_loc, offsets.nodeToSlice(self.tree, root_decl) });
+                    if (node_loc.end < start_source_index) continue;
+                    // std.log.debug("! ssi: {}\nrd.loc: {}\n=========\n{s}\n=========\n", .{ start_source_index, node_loc, offsets.nodeToSlice(self.tree, root_decl) });
+                    if (idx == 0) break;
+                    // std.log.debug("1st tok of affn: {}", .{self.tree.firstToken(root_decls[idx])});
+                    const prev_node_state = self.tree_nstates.get(root_decls[idx - 1]) orelse break;
+                    if (!(prev_node_state.token_ind < new_tokens.len)) break;
+                    // var new_nodes = try self.tree.nodes.toMultiArrayList().clone(gpa);
+                    var new_nodes: Ast.NodeList = .{};
+                    try new_nodes.setCapacity(gpa, self.tree.nodes.len);
+                    errdefer new_nodes.deinit(gpa);
+                    new_nodes.len = prev_node_state.nodes_len;
+
+                    const new_nodes_tags = new_nodes.items(.tag);
+                    @memcpy(new_nodes_tags, self.tree.nodes.items(.tag)[0..new_nodes_tags.len]);
+
+                    const new_nodes_data = new_nodes.items(.data);
+                    @memcpy(new_nodes_data, self.tree.nodes.items(.data)[0..new_nodes_data.len]);
+
+                    const new_nodes_mtok = new_nodes.items(.main_token);
+                    @memcpy(new_nodes_mtok, self.tree.nodes.items(.main_token)[0..new_nodes_mtok.len]);
+
+                    var new_xdata: std.ArrayListUnmanaged(Ast.Node.Index) = try .initCapacity(gpa, self.tree.extra_data.len);
+                    errdefer new_xdata.deinit(gpa);
+                    new_xdata.items.len = prev_node_state.xdata_len;
+                    @memcpy(new_xdata.items, self.tree.extra_data[0..new_xdata.items.len]);
+                    // new_xdata.items = try gpa.dupe(u32, self.tree.extra_data);
+                    // new_xdata.items.len = prev_node_state.xdata_len;
+                    // new_xdata.capacity = self.tree.extra_data.len;
+                    var scratch: std.ArrayListUnmanaged(Ast.Node.Index) = try .initCapacity(gpa, root_decls.len);
+                    errdefer scratch.deinit(gpa);
+                    for (root_decls[0..idx]) |value| scratch.appendAssumeCapacity(value);
+                    var new_nstates: CustomAst.States = .empty;
+                    errdefer new_nstates.deinit(gpa);
+                    for (self.tree_nstates.keys()) |key| {
+                        if (key < root_decls[idx]) {
+                            try new_nstates.put(gpa, key, self.tree_nstates.get(key).?);
+                        }
+                    }
+                    // std.log.debug("scratch new: {any}", .{scratch.items});
+                    nodes = .{
+                        .some = .{
+                            .nodes = &new_nodes,
+                            .xdata = &new_xdata,
+                            .scratch = &scratch,
+                            .nstates = &new_nstates,
+                            .start_token_index = prev_node_state.token_ind,
+                        },
+                    };
+                    break;
+                    // std.log.debug("hmmm: {}", .{self.tree_nstates});
+                    // std.log.debug("hmmm: {}", .{self.tree_nstates.entries.len});
+                    // std.log.debug("asking: {}", .{root_decls[idx - 1]});
+                    // std.log.debug("prev node state: {any}\n current tok_i: {}", .{ prev_node_state, tok_i });
+                    // for (self.tree.rootDecls()[0..root_decl]) |node| std.log.debug("\n{s}", .{offsets.nodeToSlice(self.tree, node)});
+                    // modified_node_idx = root_decl;
+                    // if (root_decl == 0) break;
+                    // var nodes = try self.tree.nodes.toMultiArrayList().clone(gpa);
+                    // nodes.len
+                    // break;
+                }
+
+                break :reuse .{ // TODO make completions work here
+                    .tokens = .{
+                        .full = &new_tokens,
+                    },
+                    .nodes = nodes,
+                };
             };
 
-            const zls_ast = try Parser.parse(
+            break :custom_ast try CustomAst.parse(
                 self.impl.allocator,
                 content_changes.text,
                 .zig,
-                existing_tokens,
+                reusable_data,
             );
-
-            break :new_tree .{ // TODO make completions work here
-                .source = zls_ast.source,
-                .tokens = zls_ast.tokens,
-                .nodes = zls_ast.nodes,
-                .extra_data = zls_ast.extra_data,
-                .errors = zls_ast.errors,
-            };
         };
 
         self.impl.lock.lock();
@@ -707,12 +798,22 @@ pub const Handle = struct {
         const old_status: Handle.Status = @bitCast(self.impl.status.swap(@bitCast(new_status), .acq_rel));
 
         var old_tree = self.tree;
+        var old_tree_nstates = self.tree_nstates;
         var old_import_uris = self.import_uris;
         var old_cimports = self.cimports;
         var old_document_scope = if (old_status.has_document_scope) self.impl.document_scope else null;
         var old_zir = if (old_status.has_zir) self.impl.zir else null;
 
+        const new_tree: Ast = .{
+            .source = custom_ast.source,
+            .tokens = custom_ast.tokens,
+            .nodes = custom_ast.nodes,
+            .extra_data = custom_ast.extra_data,
+            .errors = custom_ast.errors,
+        };
+
         self.tree = new_tree;
+        self.tree_nstates = custom_ast.nstates;
         self.import_uris = .{};
         self.cimports = .{};
         self.impl.document_scope = undefined;
@@ -720,6 +821,7 @@ pub const Handle = struct {
 
         self.impl.lock.unlock();
 
+        old_tree_nstates.deinit(gpa);
         self.impl.allocator.free(old_tree.source);
         old_tree.deinit(self.impl.allocator);
 
@@ -743,6 +845,7 @@ pub const Handle = struct {
 
         if (status.has_zir) self.impl.zir.deinit(allocator);
         if (status.has_document_scope) self.impl.document_scope.deinit(allocator);
+        self.tree_nstates.deinit(allocator);
         allocator.free(self.tree.source);
         self.tree.deinit(allocator);
         allocator.free(self.uri);

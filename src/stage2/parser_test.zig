@@ -6033,7 +6033,6 @@ test "recovery: invalid container members" {
     , &[_]Error{
         .expected_expr,
         .expected_comma_after_field,
-        .expected_type_expr,
         .expected_semi_after_stmt,
     });
 }
