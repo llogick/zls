@@ -9,3 +9,6 @@ Key differences:
   - `return .`
   - `return error.`
   - `switch(err) { error. }`
+
+> [!NOTE]  
+> Remember to rename the executable or update your editor's configuration
