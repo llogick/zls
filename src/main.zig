@@ -37,7 +37,14 @@ pub const std_options: std.Options = .{
     .logFn = logFn,
 };
 
-var runtime_log_level: std.log.Level = if (zig_builtin.mode == .Debug) .debug else .info;
+var runtime_log_level: std.log.Level = switch (zig_builtin.mode) {
+    .Debug => .debug,
+    .ReleaseFast,
+    .ReleaseSmall,
+    => .err,
+    else => .info,
+};
+
 var log_file: ?std.fs.File = null;
 
 fn logFn(

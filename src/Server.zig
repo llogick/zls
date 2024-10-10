@@ -569,7 +569,7 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
             defer config_result.deinit(server.allocator);
             switch (config_result.*) {
                 .success => |config_with_path| {
-                    log.info("Loaded config:      {s}", .{config_with_path.path});
+                    log.info("$ Reading {s} ..", .{config_with_path.path});
                     try server.updateConfiguration2(config_with_path.config.value, .{});
                 },
                 .failure => |payload| blk: {
@@ -910,7 +910,7 @@ pub fn updateConfiguration(
             };
 
             if (override_value) {
-                log.info("Set config option '{s}' to {}", .{ field.name, std.json.fmt(new_value, .{}) });
+                log.info("$ {s} -> [{}]", .{ field.name, std.json.fmt(new_value, .{}) });
                 @field(server.config, field.name) = switch (@TypeOf(new_value)) {
                     []const []const u8 => blk: {
                         const copy = try config_arena.alloc([]const u8, new_value.len);
@@ -1934,7 +1934,14 @@ fn processMessage(server: *Server, message: Message) Error!?[]u8 {
             log.debug("Took {d}ms to process {}", .{ total_time, fmtMessage(message) });
         } else {
             const thread_id = std.Thread.getCurrentId();
-            log.debug("Took {d}ms to process {} on Thread {d}", .{ total_time, fmtMessage(message), thread_id });
+            log.debug(
+                "T[{d}] {} {d}ms",
+                .{
+                    thread_id,
+                    fmtMessage(message),
+                    total_time,
+                },
+            );
         }
     };
 
@@ -2140,9 +2147,29 @@ pub fn formatMessage(
     _ = options;
     if (fmt.len != 0) std.fmt.invalidFmtError(fmt, message);
     switch (message) {
-        .request => |request| try writer.print("request-{}-{s}", .{ std.json.fmt(request.id, .{}), @tagName(request.params) }),
-        .notification => |notification| try writer.print("notification-{s}", .{@tagName(notification.params)}),
-        .response => |response| try writer.print("response-{?}", .{std.json.fmt(response.id, .{})}),
+        .request => |request| try writer.print(
+            "M[{}][{s}]",
+            .{
+                std.json.fmt(
+                    request.id,
+                    .{},
+                ),
+                @tagName(request.params),
+            },
+        ),
+        .notification => |notification| try writer.print(
+            "M[notification][{s}]",
+            .{@tagName(notification.params)},
+        ),
+        .response => |response| try writer.print(
+            "M[response][{?}]",
+            .{
+                std.json.fmt(
+                    response.id,
+                    .{},
+                ),
+            },
+        ),
     }
 }
 
