@@ -1,6 +1,6 @@
 ---
 name: Improvement
-about: Enhance the ZLS experience
+about: Share your idea
 labels: enhancement
 ---
 

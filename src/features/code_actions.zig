@@ -105,7 +105,7 @@ pub fn collectAutoDiscardDiagnostics(
             .range = offsets.tokenToRange(tree, identifier_token, offset_encoding),
             .severity = .Information,
             .code = null,
-            .source = "zls",
+            .source = "zigscient",
             .message = "auto discard for unused variable",
             // TODO add a relatedInformation that shows where the discarded identifier comes from
         });

@@ -587,7 +587,7 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
 
     return .{
         .serverInfo = .{
-            .name = "zls",
+            .name = "zigscient",
             .version = build_options.version_string,
         },
         .capabilities = .{
@@ -666,10 +666,6 @@ fn initializedHandler(server: *Server, _: std.mem.Allocator, notification: types
 
     if (server.client_capabilities.supports_configuration)
         try server.requestConfiguration();
-
-    if (std.crypto.random.intRangeLessThan(usize, 0, 32768) == 0) {
-        server.showMessage(.Warning, "HELP ME, I AM STUCK INSIDE AN LSP!", .{});
-    }
 }
 
 fn shutdownHandler(server: *Server, _: std.mem.Allocator, _: void) Error!?void {
@@ -991,19 +987,19 @@ pub fn updateConfiguration(
             } else if (zig_version_is_tagged) {
                 server.showMessage(
                     .Warning,
-                    "Zig {} should be used with ZLS {}.{}.* but ZLS {} is being used.",
+                    "Zig {} should be used with {}.{}.* but {} is being used.",
                     .{ zig_version, zig_version.major, zig_version.minor, zls_version },
                 );
             } else if (zls_version_is_tagged) {
                 server.showMessage(
                     .Warning,
-                    "ZLS {} should be used with Zig {}.{}.* but found Zig {}.",
+                    "{} should be used with Zig {}.{}.* but found Zig {}.",
                     .{ zls_version, zls_version.major, zls_version.minor, zig_version },
                 );
             } else {
                 server.showMessage(
                     .Warning,
-                    "ZLS {} requires at least Zig {s} but got Zig {}. Update Zig to avoid unexpected behavior.",
+                    "{} requires at least Zig {s} but got Zig {}. Update Zig to avoid unexpected behavior.",
                     .{ zls_version, build_options.minimum_runtime_zig_version_string, zig_version },
                 );
             }
@@ -1215,7 +1211,7 @@ fn resolveConfiguration(
         };
         defer allocator.free(cache_dir_path);
 
-        config.global_cache_path = try std.fs.path.join(config_arena, &[_][]const u8{ cache_dir_path, "zls" });
+        config.global_cache_path = try std.fs.path.join(config_arena, &[_][]const u8{ cache_dir_path, "zigscient" });
 
         std.fs.cwd().makePath(config.global_cache_path.?) catch |err| {
             log.warn("failed to create directory '{s}': {}", .{ config.global_cache_path.?, err });
@@ -1807,7 +1803,7 @@ pub fn waitAndWork(server: *Server) void {
     server.wait_group.reset();
 }
 
-/// The main loop of ZLS
+/// The main loop
 pub fn loop(server: *Server) !void {
     std.debug.assert(server.transport != null);
     while (server.keepRunning()) {

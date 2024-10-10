@@ -10,7 +10,7 @@ const binned_allocator = @import("binned_allocator.zig");
 const log = std.log.scoped(.zls_main);
 
 const usage =
-    \\ZLS - A non-official language server for Zig
+    \\A non-official language server for Zig
     \\
     \\Commands:
     \\  help, --help,             Print this help and exit
@@ -20,7 +20,7 @@ const usage =
     \\General Options:
     \\  --config-path [path]      Set path to the 'zls.json' configuration file
     \\  --enable-message-tracing  Enable message tracing
-    \\  --log-file [path]         Set path to the 'zls.log' log file
+    \\  --log-file [path]         Set path to the 'zigscient.log' log file
     \\  --log-level [enum]        The Log Level to be used.
     \\                              Supported Values:
     \\                                err
@@ -86,7 +86,7 @@ fn defaultLogFilePath(allocator: std.mem.Allocator) std.mem.Allocator.Error!?[]c
         error.ParseError => return null,
     } orelse return null;
     defer allocator.free(cache_path);
-    return try std.fs.path.join(allocator, &.{ cache_path, "zls", "zls.log" });
+    return try std.fs.path.join(allocator, &.{ cache_path, "zigscient", "zigscient.log" });
 }
 
 fn createLogFile(allocator: std.mem.Allocator, override_log_file_path: ?[]const u8) ?struct { std.fs.File, []const u8 } {
@@ -109,14 +109,14 @@ fn createLogFile(allocator: std.mem.Allocator, override_log_file_path: ?[]const 
     return .{ file, log_file_path };
 }
 
-/// Output format of `zls env`
+/// Output format of ` env`
 const Env = struct {
-    /// The ZLS version. Guaranteed to be a [semantic version](https://semver.org/).
+    /// The project version. Guaranteed to be a [semantic version](https://semver.org/).
     ///
     /// The semantic version can have one of the following formats:
-    /// - `MAJOR.MINOR.PATCH` is a tagged release of ZLS
-    /// - `MAJOR.MINOR.PATCH-dev.COMMIT_HEIGHT-SHORT_COMMIT_HASH` is a development build of ZLS
-    /// - `MAJOR.MINOR.PATCH-dev` is a development build of ZLS where the exact version could not be resolved.
+    /// - `MAJOR.MINOR.PATCH` is a tagged release
+    /// - `MAJOR.MINOR.PATCH-dev.COMMIT_HEIGHT-SHORT_COMMIT_HASH` is a development build
+    /// - `MAJOR.MINOR.PATCH-dev` is a development build, where the exact version could not be resolved.
     ///
     version: []const u8,
     global_cache_dir: ?[]const u8,
@@ -141,7 +141,7 @@ fn @"zls env"(allocator: std.mem.Allocator) (std.mem.Allocator.Error || std.fs.F
     };
     defer if (global_cache_dir) |path| allocator.free(path);
 
-    const zls_global_cache_dir = if (global_cache_dir) |cache_dir| try std.fs.path.join(allocator, &.{ cache_dir, "zls" }) else null;
+    const zls_global_cache_dir = if (global_cache_dir) |cache_dir| try std.fs.path.join(allocator, &.{ cache_dir, "zigscient" }) else null;
     defer if (zls_global_cache_dir) |path| allocator.free(path);
 
     const global_config_dir = known_folders.getPath(allocator, .global_configuration) catch |err| switch (err) {
@@ -295,8 +295,7 @@ fn parseArgs(allocator: std.mem.Allocator) ParseArgsError!ParseArgsResult {
     }
 
     if (std.io.getStdIn().isTty()) {
-        log.warn("ZLS is not a CLI tool, it communicates over the Language Server Protocol.", .{});
-        log.warn("Did you mean to run 'zls --help'?", .{});
+        log.warn("Zigscient is not a CLI tool, it communicates over the Language Server Protocol.", .{});
         log.warn("", .{});
     }
 
@@ -333,10 +332,10 @@ pub fn main() !u8 {
 
     const resolved_log_level = result.log_level orelse runtime_log_level;
 
-    log.info("Starting ZLS      {s} @ '{s}'", .{ zls.build_options.version_string, result.zls_exe_path });
-    log.info("Message Tracing:  {}", .{result.enable_message_tracing});
-    log.info("Log Level:        {s}", .{@tagName(resolved_log_level)});
-    log.info("Log File:         {?s}", .{log_file_path});
+    log.info("Starting Zigscient {s} @ '{s}'", .{ zls.build_options.version_string, result.zls_exe_path });
+    log.info("Message Tracing:   {}", .{result.enable_message_tracing});
+    log.info("Log Level:         {s}", .{@tagName(resolved_log_level)});
+    log.info("Log File:          {?s}", .{log_file_path});
 
     runtime_log_level = resolved_log_level;
 

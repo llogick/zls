@@ -37,7 +37,7 @@ pub fn generateDiagnostics(server: *Server, arena: std.mem.Allocator, handle: *D
             .range = offsets.tokenToRange(tree, err.token, server.offset_encoding),
             .severity = .Error,
             .code = .{ .string = @tagName(err.tag) },
-            .source = "zls",
+            .source = "zigscient",
             .message = try buffer.toOwnedSlice(arena),
         });
     }
@@ -72,7 +72,7 @@ pub fn generateDiagnostics(server: *Server, arena: std.mem.Allocator, handle: *D
                         .range = offsets.tokenToRange(tree, import_str_token, server.offset_encoding),
                         .severity = .Hint,
                         .code = .{ .string = "dot_slash_import" },
-                        .source = "zls",
+                        .source = "zigscient",
                         .message = "A ./ is not needed in imports",
                     });
                 }
@@ -103,7 +103,7 @@ pub fn generateDiagnostics(server: *Server, arena: std.mem.Allocator, handle: *D
                                     .range = offsets.tokenToRange(tree, name_token, server.offset_encoding),
                                     .severity = .Hint,
                                     .code = .{ .string = "bad_style" },
-                                    .source = "zls",
+                                    .source = "zigscient",
                                     .message = "Functions should be camelCase",
                                 });
                             } else if (is_type_function and !Analyser.isPascalCase(func_name)) {
@@ -111,7 +111,7 @@ pub fn generateDiagnostics(server: *Server, arena: std.mem.Allocator, handle: *D
                                     .range = offsets.tokenToRange(tree, name_token, server.offset_encoding),
                                     .severity = .Hint,
                                     .code = .{ .string = "bad_style" },
-                                    .source = "zls",
+                                    .source = "zigscient",
                                     .message = "Type functions should be PascalCase",
                                 });
                             }
@@ -142,7 +142,7 @@ pub fn generateDiagnostics(server: *Server, arena: std.mem.Allocator, handle: *D
                 .range = offsets.nodeToRange(tree, node, server.offset_encoding),
                 .severity = .Error,
                 .code = .{ .string = "cImport" },
-                .source = "zls",
+                .source = "zigscient",
                 .message = try arena.dupe(u8, error_bundle.nullTerminatedString(err_msg.msg)),
             });
         }
@@ -168,7 +168,7 @@ pub fn generateDiagnostics(server: *Server, arena: std.mem.Allocator, handle: *D
                         .range = offsets.tokenToRange(tree, decl_main_token, server.offset_encoding),
                         .severity = .Hint,
                         .code = .{ .string = "highlight_global_var_declarations" },
-                        .source = "zls",
+                        .source = "zigscient",
                         .message = "Global var declaration",
                     });
                 },
@@ -368,7 +368,7 @@ pub fn generateBuildOnSaveDiagnostics(
                 .range = range,
                 .severity = .Error,
                 .code = .{ .string = "zig_build" },
-                .source = "zls",
+                .source = "zigscient",
                 .message = try arena.dupe(u8, msg["error: ".len..]),
             };
         } else {
@@ -377,7 +377,7 @@ pub fn generateBuildOnSaveDiagnostics(
                 .range = range,
                 .severity = .Error,
                 .code = .{ .string = "zig_build" },
-                .source = "zls",
+                .source = "zigscient",
                 .message = try arena.dupe(u8, msg),
             };
         }
@@ -507,7 +507,7 @@ fn getDiagnosticsFromAstCheck(
                 .range = range,
                 .severity = .Error,
                 .code = .{ .string = "ast_check" },
-                .source = "zls",
+                .source = "zigscient",
                 .message = try arena.dupe(u8, msg["error: ".len..]),
             };
         } else {
@@ -515,7 +515,7 @@ fn getDiagnosticsFromAstCheck(
                 .range = range,
                 .severity = .Error,
                 .code = .{ .string = "ast_check" },
-                .source = "zls",
+                .source = "zigscient",
                 .message = try arena.dupe(u8, msg),
             };
         }
@@ -597,7 +597,7 @@ fn getDiagnosticsFromZir(
             .range = offsets.locToRange(handle.tree.source, err_loc, server.offset_encoding),
             .severity = .Error,
             .code = .{ .string = "ast_check" },
-            .source = "zls",
+            .source = "zigscient",
             .message = msg,
             .relatedInformation = if (notes.len != 0) notes else null,
         });

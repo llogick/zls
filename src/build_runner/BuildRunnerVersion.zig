@@ -102,7 +102,7 @@ test selectVersionInternal {
         const build_runner = BuildRunnerVersion.selectBuildRunnerVersion(current_zig_version);
         if (build_runner == null) {
             std.debug.print(
-                \\ZLS is being tested with Zig {}.
+                \\Project is being tested with Zig {}.
                 \\No build runner could be resolved for this Zig version!
                 \\
             , .{current_zig_version});
@@ -113,14 +113,14 @@ test selectVersionInternal {
     {
         const is_zls_version_tagged_release = build_options.version.build == null and build_options.version.pre == null;
         if (is_zls_version_tagged_release) {
-            // A tagged release of ZLS should support the same tagged release of Zig
-            // Example: ZLS 0.12.0 should support Zig 0.12.0
+            // A tagged release should support the same tagged release of Zig
+            // Example: 0.12.0 should support Zig 0.12.0
             const build_runner = BuildRunnerVersion.selectBuildRunnerVersion(build_options.version);
             try expect(build_runner != null);
             try expect(build_runner.?.isTaggedRelease());
         } else {
-            // A development build of ZLS should support the latest tagged release of Zig
-            // Example: ZLS 0.13.0-dev.1+aaaaaaaaa should support Zig 0.12.0
+            // A development build should support the latest tagged release of Zig
+            // Example: 0.13.0-dev.1+aaaaaaaaa should support Zig 0.12.0
             const build_runner = BuildRunnerVersion.selectBuildRunnerVersion(.{ .major = build_options.version.major, .minor = build_options.version.minor - 1, .patch = 0 });
             try expect(build_runner != null);
             try expect(build_runner.?.isTaggedRelease());
