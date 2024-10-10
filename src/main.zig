@@ -49,10 +49,10 @@ fn logFn(
     if (@intFromEnum(level) > @intFromEnum(runtime_log_level)) return;
 
     const level_txt: []const u8 = switch (level) {
-        .err => "error",
-        .warn => "warn ",
-        .info => "info ",
-        .debug => "debug",
+        .err => "E",
+        .warn => "W",
+        .info => "I",
+        .debug => "D",
     };
     const scope_txt: []const u8 = comptime @tagName(scope);
     const trimmed_scope = if (comptime std.mem.startsWith(u8, scope_txt, "zls_")) scope_txt[4..] else scope_txt;
@@ -60,7 +60,7 @@ fn logFn(
     var buffer: [1024]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buffer);
     const no_space_left = blk: {
-        fbs.writer().print("{s} ({s:^6}): ", .{ level_txt, trimmed_scope }) catch break :blk true;
+        fbs.writer().print("<{s:^6}> {s}: ", .{ trimmed_scope, level_txt }) catch break :blk true;
         fbs.writer().print(format, args) catch break :blk true;
         fbs.writer().writeByte('\n') catch break :blk true;
         break :blk false;
@@ -302,16 +302,36 @@ fn parseArgs(allocator: std.mem.Allocator) ParseArgsError!ParseArgsResult {
     return result;
 }
 
+const LibcAllocatorInterface = struct {
+    const Self = @This();
+    pub fn allocator(_: Self) std.mem.Allocator {
+        return std.heap.c_allocator;
+    }
+    pub const init: Self = .{};
+    pub fn deinit(_: Self) void {}
+};
+
 const stack_frames = switch (zig_builtin.mode) {
     .Debug => 10,
     else => 0,
 };
 
 pub fn main() !u8 {
-    var allocator_state = if (exe_options.use_gpa)
-        std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = stack_frames }){}
+    var allocator_state, const allocator_name = if (exe_options.use_gpa)
+        .{
+            std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = stack_frames }){},
+            "GPA",
+        }
+    else if (exe_options.llc)
+        .{
+            LibcAllocatorInterface{},
+            "C",
+        }
     else
-        binned_allocator.BinnedAllocator(.{}){};
+        .{
+            binned_allocator.BinnedAllocator(.{}){},
+            "Binned",
+        };
     defer _ = allocator_state.deinit();
 
     var tracy_state = if (tracy.enable_allocation) tracy.tracyAllocator(allocator_state.allocator()) else void{};
@@ -323,7 +343,9 @@ pub fn main() !u8 {
     const result = try parseArgs(allocator);
     defer result.deinit(allocator);
 
-    log_file, const log_file_path = createLogFile(allocator, result.log_file_path) orelse .{ null, null };
+    log_file, const log_file_path =
+        // createLogFile(allocator, result.log_file_path) orelse
+        .{ null, null };
     defer if (log_file_path) |path| allocator.free(path);
     defer if (log_file) |file| {
         file.close();
@@ -332,10 +354,21 @@ pub fn main() !u8 {
 
     const resolved_log_level = result.log_level orelse runtime_log_level;
 
-    log.info("Starting Zigscient {s} @ '{s}'", .{ zls.build_options.version_string, result.zls_exe_path });
-    log.info("Message Tracing:   {}", .{result.enable_message_tracing});
-    log.info("Log Level:         {s}", .{@tagName(resolved_log_level)});
-    log.info("Log File:          {?s}", .{log_file_path});
+    log.info(
+        \\Hello/
+        \\                      {s}
+        \\                      Zigscient       {s}  {s}
+        \\                      Allocator       {s}
+        \\                      Log Level       {s}
+        \\                      Message Tracing {}
+    , .{
+        result.zls_exe_path,
+        zls.build_options.version_string,
+        @tagName(zig_builtin.mode),
+        allocator_name,
+        @tagName(resolved_log_level),
+        result.enable_message_tracing,
+    });
 
     runtime_log_level = resolved_log_level;
 
