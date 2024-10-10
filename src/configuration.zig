@@ -14,13 +14,13 @@ const logger = std.log.scoped(.zls_config);
 pub fn getLocalConfigPath(allocator: std.mem.Allocator) known_folders.Error!?[]const u8 {
     const folder_path = try known_folders.getPath(allocator, .local_configuration) orelse return null;
     defer allocator.free(folder_path);
-    return try std.fs.path.join(allocator, &.{ folder_path, "zigscient.json" });
+    return try std.fs.path.join(allocator, &.{ folder_path, "zls.json" });
 }
 
 pub fn getGlobalConfigPath(allocator: std.mem.Allocator) known_folders.Error!?[]const u8 {
     const folder_path = try known_folders.getPath(allocator, .global_configuration) orelse return null;
     defer allocator.free(folder_path);
-    return try std.fs.path.join(allocator, &.{ folder_path, "zigscient.json" });
+    return try std.fs.path.join(allocator, &.{ folder_path, "zls.json" });
 }
 
 pub fn load(allocator: std.mem.Allocator) error{OutOfMemory}!LoadConfigResult {
