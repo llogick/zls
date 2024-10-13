@@ -557,6 +557,7 @@ pub const Handle = struct {
                 if ((content_changes.idx_hi <= content_changes.idx_lo) or
                     (content_changes.text.len < 150) or
                     (tok_tags.len < 300) or
+                    !(content_changes.idx_hi < self.tree.source.len - 20) or
                     !(content_changes.idx_hi < (content_changes.text.len - 20)))
                 {
                     var tokens = try self.tree.tokens.toMultiArrayList().clone(gpa);
