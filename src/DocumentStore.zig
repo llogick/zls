@@ -256,7 +256,7 @@ pub const Handle = struct {
             allocator,
             text,
             .zig,
-            .{},
+            &.{},
         );
 
         errdefer custom_ast.deinit(allocator);
@@ -611,11 +611,9 @@ pub const Handle = struct {
                 //     try new_tokens.append(gpa, .{ .start = start, .tag = tag });
                 // }
 
-                // Add new tokens
                 const text = content_changes.text;
 
-                // do delta
-                const delta: struct {
+                const text_delta: struct {
                     op: enum {
                         add,
                         sub,
@@ -656,19 +654,43 @@ pub const Handle = struct {
                     .index = start_source_index,
                 };
 
+                const reused_tokens_len = new_tokens.len;
+
                 while (true) {
                     const token = tokenizer.next();
                     // std.log.debug("newtok: {}", .{token});
-                    // std.log.debug("adding: {}", .{token});
-                    if ((token.loc.start == switch (delta.op) {
-                        .add => upper_source_index + delta.value,
-                        .sub => upper_source_index - delta.value,
+                    if ((token.loc.start == switch (text_delta.op) {
+                        .add => upper_source_index + text_delta.value,
+                        .sub => upper_source_index - text_delta.value,
                     })) break;
+                    // std.log.debug("adding: {}", .{token});
                     try new_tokens.append(gpa, .{
                         .tag = token.tag,
                         .start = @as(u32, @intCast(token.loc.start)),
                     });
                 }
+                const base_affected_tokens_len = upper_tok_i - tok_i;
+                const new_affected_tokens_len: usize = new_tokens.len - reused_tokens_len;
+
+                const tokens_delta: CustomAst.Delta = if (new_affected_tokens_len == base_affected_tokens_len) .{
+                    .op = .nop,
+                    .value = 0,
+                } else if (new_affected_tokens_len > base_affected_tokens_len) .{
+                    .op = .add,
+                    .value = @intCast(new_affected_tokens_len - base_affected_tokens_len),
+                } else .{
+                    .op = .sub,
+                    .value = @intCast(base_affected_tokens_len - new_affected_tokens_len),
+                };
+
+                std.log.debug(
+                    \\
+                    \\"tokens_delta: {}"
+                    \\"text   delta  {}"
+                , .{
+                    tokens_delta,
+                    text_delta,
+                });
 
                 const cnti = new_tokens.len;
                 const num_to_copy = tok_tags.len - upper_tok_i;
@@ -690,12 +712,26 @@ pub const Handle = struct {
                 @memcpy(new_tokens.items(.tag)[cnti..], tok_tags[upper_tok_i..]);
 
                 for (new_tokens.items(.start)[cnti..]) |*start| {
-                    const new_start: u32 = switch (delta.op) {
-                        .add => start.* + delta.value,
-                        .sub => start.* - delta.value,
+                    // std.log.debug("old start idx: {}", .{start.*});
+                    const new_start: u32 = switch (text_delta.op) {
+                        .add => start.* + text_delta.value,
+                        .sub => start.* - text_delta.value,
                     };
+                    // std.log.debug("new start idx: {}", .{new_start});
                     start.* = new_start;
                 }
+
+                // XXX This is probably wrong, eg a Find and Replace "fn" -> "nf"
+                // if (tokens_delta.op == .nop) {
+                //     const old_status: Handle.Status = @bitCast(self.impl.status.swap(@bitCast(new_status), .acq_rel));
+                //     if (old_status.has_document_scope) self.impl.document_scope.deinit(gpa);
+                //     if (old_status.has_zir) self.impl.zir.deinit(gpa); // XXX Can it be reused?
+                //     gpa.free(self.tree.source);
+                //     self.tree.source = text;
+                //     self.tree.tokens.deinit(gpa);
+                //     self.tree.tokens = new_tokens.toOwnedSlice();
+                //     return;
+                // }
 
                 // Add the rest of the existing tokens
                 // for (tok_starts[upper_tok_i + 1 ..], tok_tags[upper_tok_i + 1 ..]) |start, tag| {
@@ -710,8 +746,8 @@ pub const Handle = struct {
 
                 var nodes: CustomAst.ReusableNodes = .none;
                 // var modified_node_idx: ?u32 = null;
-                // std.log.debug("root decls: {any}", .{self.tree.rootDecls()});
-                // std.log.debug("nstates   : {any}", .{self.tree_nstates.keys()});
+                std.log.debug("root decls: {any}", .{self.tree.rootDecls()});
+                std.log.debug("nstates   : {any}", .{self.tree_nstates.keys()});
                 const root_decls = self.tree.rootDecls();
                 for (root_decls, 0..) |root_decl, idx| {
                     const node_loc = offsets.nodeToLoc(self.tree, root_decl);
@@ -754,6 +790,132 @@ pub const Handle = struct {
                             try new_nstates.put(gpa, key, self.tree_nstates.get(key).?);
                         }
                     }
+                    var new_errors: std.ArrayListUnmanaged(std.zig.Ast.Error) = try .initCapacity(gpa, self.tree.errors.len);
+                    errdefer new_errors.deinit(gpa);
+                    for (self.tree.errors) |ast_err| {
+                        if (ast_err.token < prev_node_state.token_ind) {
+                            new_errors.appendAssumeCapacity(ast_err);
+                        } else break;
+                    }
+
+                    for (root_decls[idx..], idx..) |root_decl2, idx2| {
+                        const rd2_first_tok_idx = self.tree.firstToken(root_decl2);
+                        // std.log.debug("rd2tag: {}", .{tok_tags[rd2_first_tok_idx]});
+                        // std.log.debug(
+                        //     \\
+                        //     \\rd2idx    {}
+                        //     \\uppidx    {}
+                        // , .{
+                        //     rd2_first_tok_idx,
+                        //     upper_tok_i,
+                        // });
+
+                        // const node_loc2 = offsets.nodeToLoc(self.tree, root_decl2);
+                        // std.log.debug("rd.id: {}\nrd.loc: {}\n=========\n{s}\n=========\n", .{ root_decl, node_loc, offsets.nodeToSlice(self.tree, root_decl) });
+                        // if (tok_starts[rd2_first_tok_idx] < upper_source_index) continue;
+                        if (rd2_first_tok_idx < upper_tok_i) continue;
+                        // if (idx2 - idx == 1) continue;
+                        const mod_node_state = self.tree_nstates.get(root_decls[idx2 - 1]) orelse break;
+
+                        const stop_token_index = switch (tokens_delta.op) {
+                            .add => rd2_first_tok_idx + tokens_delta.value,
+                            .sub => rd2_first_tok_idx - tokens_delta.value,
+                            else => rd2_first_tok_idx,
+                        };
+
+                        // const currns = self.tree_nstates.get(root_decls[idx2]) orelse blk: {
+                        //     std.log.debug("whaaaaaaat?: {}", .{root_decls[idx2]});
+                        //     break :blk mod_node_state;
+                        // };
+                        // if (tokens_delta.op == .sub) {
+                        //     std.log.debug("lalala: {}\n{}", .{
+                        //         mod_node_state.token_ind - prev_node_state.token_ind - tokens_delta.value - base_affected_tokens_len,
+                        //         currns.token_ind,
+                        //     });
+                        // }
+
+                        // std.log.debug(
+                        //     \\
+                        //     \\idx: {}      idx2: {}
+                        //     \\strt tok i {}     stop tok i {}
+                        //     \\strt src i {}     stop src i {}
+                        //     \\smh {}
+                        // , .{
+                        //     idx,
+                        //     idx2,
+                        //     prev_node_state.token_ind,
+                        //     stop_token_index,
+                        //     start_source_index,
+                        //     offsets.tokenToLoc(self.tree, mod_node_state.token_ind),
+                        //     node_loc,
+                        // });
+                        // std.log.debug("affected nodes: {any}", .{root_decls[idx..idx2]});
+
+                        // std.log.debug(
+                        //     \\
+                        //     \\rd2_tok_idx    {}
+                        //     \\upp_tok_idx    {}
+                        //     \\stp_tok_idx    {}
+                        //     \\
+                        //     \\lo_nde_stat    idx: {}     {}
+                        //     \\curr_n_stat    idx: {}     {}
+                        //     \\
+                        //     \\modf_n_stat    idx: {}     {}
+                        // , .{
+                        //     rd2_first_tok_idx,
+                        //     upper_tok_i,
+                        //     stop_token_index,
+                        //     idx - 1,
+                        //     prev_node_state,
+                        //     idx2,
+                        //     self.tree_nstates.get(root_decls[idx2]) orelse break,
+                        //     idx2 - 1,
+                        //     mod_node_state,
+                        // });
+
+                        const rd: CustomAst.ReusableData = .{
+                            .tokens = .{
+                                .full = &new_tokens,
+                            },
+                            .nodes = .{
+                                .span = .{
+                                    .nodes = &new_nodes,
+                                    .xdata = &new_xdata,
+                                    .scratch = &scratch,
+                                    .nstates = &new_nstates,
+                                    .errors = &new_errors,
+                                    .start_token_index = prev_node_state.token_ind,
+                                    .stop_token_index = stop_token_index,
+                                    .tokens_delta = &tokens_delta,
+                                    .lowst_node_state = prev_node_state,
+                                    .start_node_state = mod_node_state,
+                                    .root_decl_index = idx2,
+                                    .len_diffs = .{
+                                        .nodes_len = self.tree.nodes.len - mod_node_state.nodes_len,
+                                        .xdata_len = self.tree.extra_data.len - mod_node_state.xdata_len,
+                                    },
+                                    .existing_tree = &self.tree,
+                                    .existing_tree_nstates = &self.tree_nstates,
+                                },
+                            },
+                        };
+
+                        const custom_ast = try CustomAst.parse(
+                            self.impl.allocator,
+                            content_changes.text,
+                            .zig,
+                            &rd,
+                        );
+
+                        // custom_ast.deinit(gpa);
+
+                        // memcpy many
+                        // adjust indices
+
+                        break :custom_ast custom_ast;
+                        // break;
+                    }
+
                     // std.log.debug("scratch new: {any}", .{scratch.items});
                     nodes = .{
                         .some = .{
@@ -761,6 +923,7 @@ pub const Handle = struct {
                             .xdata = &new_xdata,
                             .scratch = &scratch,
                             .nstates = &new_nstates,
+                            .errors = &new_errors,
                             .start_token_index = prev_node_state.token_ind,
                         },
                     };
@@ -789,7 +952,7 @@ pub const Handle = struct {
                 self.impl.allocator,
                 content_changes.text,
                 .zig,
-                reusable_data,
+                &reusable_data,
             );
         };
 

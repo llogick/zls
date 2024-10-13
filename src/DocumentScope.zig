@@ -788,7 +788,10 @@ fn walkNode(
         .builtin_call_comma,
         .container_field,
         .@"asm",
-        => walkOtherNode(context, tree, node_idx),
+        => {
+            // std.log.debug("won tag: {}   idx: {}", .{ ntag, node_idx });
+            try walkOtherNode(context, tree, node_idx);
+        },
 
         .asm_output,
         .asm_input,
@@ -829,7 +832,10 @@ noinline fn walkContainerDecl(
             .keyword_union => .{ container_decl.ast.enum_token != null or container_decl.ast.arg != 0, false },
             .keyword_struct => .{ false, true },
             .keyword_opaque => .{ false, false },
-            else => unreachable,
+            else => {
+                // std.log.debug("ds: tag: {}", .{tag});
+                unreachable;
+            },
         };
     };
 
@@ -899,6 +905,22 @@ noinline fn walkContainerDecl(
             .aligned_var_decl,
             => {
                 const name_token = tree.fullVarDecl(decl).?.ast.mut_token + 1;
+                // std.log.debug(
+                //     \\ SVD     nidx: {}      ntag: {}        ttag: {}
+                // , .{
+                //     decl,
+                //     tree.nodes.items(.tag)[decl],
+                //     token_tags[name_token],
+                // });
+                // std.log.debug(
+                //     \\ SVD
+                //     \\ tslc: {s}
+                //     \\ nslc:
+                //     \\{s}
+                // , .{
+                //     tree.tokenSlice(name_token),
+                //     offsets.nodeToSlice(tree, decl),
+                // });
                 try scope.pushDeclaration(name_token, .{ .ast_node = decl }, .other);
             },
 
@@ -1041,6 +1063,24 @@ fn walkBlockNodeKeepOpen(
             => {
                 const var_decl = tree.fullVarDecl(idx).?;
                 const name_token = var_decl.ast.mut_token + 1;
+
+                // std.log.debug(
+                //     \\
+                //     \\ nidx: {}     ntag: {}      ttag: {}
+                // , .{
+                //     idx,
+                //     node_tags[idx],
+                //     token_tags[name_token],
+                // });
+                // std.log.debug(
+                //     \\
+                //     \\ tslc: {s}
+                //     \\ nslc:
+                //     \\{s}
+                // , .{
+                //     tree.tokenSlice(name_token),
+                //     offsets.nodeToSlice(tree, idx),
+                // });
                 try scope.pushDeclaration(name_token, .{ .ast_node = idx }, .other);
             },
             .assign_destructure => {
@@ -1302,7 +1342,10 @@ noinline fn walkSwitchNode(
     const cases = tree.extra_data[extra.start..extra.end];
 
     for (cases, 0..) |case, case_index| {
-        const switch_case: Ast.full.SwitchCase = tree.fullSwitchCase(case).?;
+        const switch_case: Ast.full.SwitchCase = tree.fullSwitchCase(case) orelse {
+            std.log.debug("unexpected node tag: {}", .{tree.nodes.items(.tag)[case]});
+            unreachable;
+        };
 
         if (switch_case.payload_token) |payload_token| {
             const name_token = payload_token + @intFromBool(token_tags[payload_token] == .asterisk);
