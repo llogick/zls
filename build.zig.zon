@@ -24,6 +24,11 @@
             .url = "https://github.com/zigtools/lsp-kit/archive/fe98e895ca3bd1b39965ab30f0f252f7b7e83ee6.tar.gz",
             .hash = "lsp_kit-0.1.0-bi_PLzAyCgClDh8_M0U9Q50ysdsQBuRuBTZfwg6rZPd6",
         },
+        .extended_zccs = .{
+            // For local dev
+            .path = "../extended-zccs",
+            // .url = "https://github.com/llogick/extended-zccs/archive/4fe762bab0a577eeedb45386744c69e1f8a3ce85.tar.gz",
+        },
         .tracy = .{
             .url = "https://github.com/wolfpld/tracy/archive/refs/tags/v0.11.1.tar.gz",
             .hash = "N-V-__8AAMeOlQEipHjcyu0TCftdAi9AQe7EXUDJOoVe0k-t",

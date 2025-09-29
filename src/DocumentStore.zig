@@ -8,6 +8,7 @@ const offsets = @import("offsets.zig");
 const log = std.log.scoped(.store);
 const lsp = @import("lsp");
 const Ast = std.zig.Ast;
+const extd_zccs = @import("extended-zccs");
 const BuildAssociatedConfig = @import("BuildAssociatedConfig.zig");
 const BuildConfig = @import("build_runner/shared.zig").BuildConfig;
 const tracy = @import("tracy");
@@ -177,6 +178,10 @@ pub const BuildFile = struct {
 /// Represents a Zig source file.
 pub const Handle = struct {
     uri: Uri,
+    /// Custom AST with extra data. Must be freed with .deinit
+    ast: extd_zccs.Ast,
+    /// std.zig.Ast compatible mapping of the custom AST ('ast`)
+    /// Never .deinit directly
     tree: Ast,
     /// Contains one entry for every cimport in the document
     cimports: std.MultiArrayList(CImportHandle),
@@ -251,17 +256,20 @@ pub const Handle = struct {
         text: [:0]const u8,
         lsp_synced: bool,
     ) error{OutOfMemory}!Handle {
-        const mode: Ast.Mode = if (std.mem.eql(u8, std.fs.path.extension(uri), ".zon")) .zon else .zig;
+        const kind: extd_zccs.Ast.Kind = if (std.mem.eql(u8, std.fs.path.extension(uri), ".zon")) .zon else .zig;
 
-        var tree = try parseTree(allocator, text, mode);
-        errdefer tree.deinit(allocator);
+        var custom_ast = try createAst(allocator, text, kind, lsp_synced);
+        errdefer custom_ast.destroy();
 
-        var cimports = try collectCIncludes(allocator, tree);
+        const std_ast = custom_ast.toStdAst();
+
+        var cimports = try collectCIncludes(allocator, std_ast);
         errdefer cimports.deinit(allocator);
 
         return .{
             .uri = uri,
-            .tree = tree,
+            .ast = custom_ast,
+            .tree = std_ast,
             .cimports = cimports,
             .impl = .{
                 .status = .init(@bitCast(Status{
@@ -272,11 +280,7 @@ pub const Handle = struct {
         };
     }
 
-    /// Caller must free `Handle.uri` if needed.
-    fn deinit(self: *Handle) void {
-        const tracy_zone = tracy.trace(@src());
-        defer tracy_zone.end();
-
+    fn deinitAstDeps(self: *Handle) void {
         const status = self.getStatus();
 
         const allocator = self.impl.allocator;
@@ -286,16 +290,26 @@ pub const Handle = struct {
             .zon => self.impl.zzoiir.zon.deinit(allocator),
         };
         if (status.has_document_scope) self.impl.document_scope.deinit(allocator);
-        allocator.free(self.tree.source);
-        self.tree.deinit(allocator);
 
         if (self.impl.import_uris) |import_uris| {
             for (import_uris) |uri| allocator.free(uri);
             allocator.free(import_uris);
+            self.impl.import_uris = null;
         }
 
         for (self.cimports.items(.source)) |source| allocator.free(source);
         self.cimports.deinit(allocator);
+    }
+
+    /// Caller must free `Handle.uri` if needed.
+    fn deinit(self: *Handle) void {
+        const tracy_zone = tracy.trace(@src());
+        defer tracy_zone.end();
+
+        const allocator = self.impl.allocator;
+
+        self.deinitAstDeps();
+        self.ast.destroy();
 
         switch (self.impl.associated_build_file) {
             .init, .none, .resolved => {},
@@ -569,23 +583,84 @@ pub const Handle = struct {
         }
     }
 
-    fn parseTree(allocator: std.mem.Allocator, new_text: [:0]const u8, mode: Ast.Mode) error{OutOfMemory}!Ast {
-        const tracy_zone_inner = tracy.traceNamed(@src(), "Ast.parse");
+    fn createAst(allocator: std.mem.Allocator, new_text: [:0]const u8, kind: extd_zccs.Ast.Kind, is_lsp_synced: bool) error{OutOfMemory}!extd_zccs.Ast {
+        const tracy_zone_inner = tracy.traceNamed(@src(), "createAst");
         defer tracy_zone_inner.end();
 
-        var tree = try Ast.parse(allocator, new_text, mode);
-        errdefer tree.deinit(allocator);
+        var custom_ast = try extd_zccs.Ast.createFromBytesSlice(
+            allocator,
+            new_text,
+            kind,
+            if (is_lsp_synced) .extended else .standard,
+        );
+        errdefer custom_ast.deinit(allocator);
 
-        // remove unused capacity
-        var nodes = tree.nodes.toMultiArrayList();
-        try nodes.setCapacity(allocator, nodes.len);
-        tree.nodes = nodes.slice();
+        return custom_ast;
+    }
 
-        // remove unused capacity
-        var tokens = tree.tokens.toMultiArrayList();
-        try tokens.setCapacity(allocator, tokens.len);
-        tree.tokens = tokens.slice();
-        return tree;
+    pub fn applyContentChanges(
+        self: *Handle,
+        content_changes: []const lsp.types.TextDocumentContentChangeEvent,
+        encoding: offsets.Encoding,
+    ) error{ OutOfMemory, InternalError }!void {
+        const tracy_zone = tracy.trace(@src());
+        defer tracy_zone.end();
+
+        const prev_bytes_len = self.ast.bytes.items.len;
+
+        // lowest and highest indexes affected by the change(s)
+        var idx_lo: u32, //
+        var idx_hi: u32, //
+        const last_full_text_index //
+        = blk: {
+            var i: u32 = @intCast(content_changes.len -| 1);
+            while (i != 0) : (i -= 1) {
+                switch (content_changes[i]) {
+                    // TextDocumentContentChangePartial
+                    .literal_0 => continue,
+                    // TextDocumentContentChangeWholeDocument
+                    .literal_1 => |content_change| {
+                        try self.ast.bytes.replaceRange(self.ast.gpa, 0, self.ast.bytes.items.len - 1, content_change.text);
+                        break :blk .{ 0, @intCast(self.ast.bytes.items.len - 1), i };
+                    },
+                }
+            }
+            break :blk .{ @intCast(self.ast.bytes.items.len - 1), 0, null };
+        };
+
+        // don't even bother applying changes before a full text change
+        const changes = content_changes[if (last_full_text_index) |index| index + 1 else 0..];
+
+        for (changes) |item| {
+            const content_change = item.literal_0; // TextDocumentContentChangePartial
+
+            const loc = offsets.rangeToLoc(self.ast.bytes.items, content_change.range, encoding);
+
+            if (loc.start < idx_lo) idx_lo = @intCast(loc.start);
+            const upper_index: u32 = @intCast(loc.end);
+            if (idx_hi < upper_index) idx_hi = upper_index;
+
+            try self.ast.bytes.replaceRange(self.ast.gpa, loc.start, loc.end - loc.start, content_change.text);
+        }
+
+        std.debug.assert(self.ast.bytes.items[self.ast.bytes.items.len - 1] == 0);
+
+        if (self.ast.bytes.items.len > DocumentStore.max_document_size) {
+            log.err("change document '{s}' failed: text size ({d}) is above maximum length ({d})", .{
+                self.uri,
+                self.ast.bytes.items.len,
+                DocumentStore.max_document_size,
+            });
+            return error.InternalError;
+        }
+
+        try self.ast.update(@intCast(prev_bytes_len), idx_lo, idx_hi);
+
+        self.deinitAstDeps();
+
+        self.impl.status = .init(@bitCast(Status{ .lsp_synced = self.isLspSynced() }));
+        self.tree = self.ast.toStdAst();
+        self.cimports = try collectCIncludes(self.impl.allocator, self.tree);
     }
 };
 
