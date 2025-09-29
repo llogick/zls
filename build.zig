@@ -426,6 +426,10 @@ fn createZLSModule(
         .enable = options.tracy_enable,
         .tracy_options = options.tracy_options,
     });
+    const extended_zccs = b.dependency("extended_zccs", .{
+        .target = options.target,
+        .optimize = options.optimize,
+    }).module("extended-zccs");
 
     const zls_module = b.createModule(.{
         .root_source_file = b.path("src/zls.zig"),
@@ -435,6 +439,7 @@ fn createZLSModule(
             .{ .name = "diffz", .module = diffz_module },
             .{ .name = "lsp", .module = lsp_module },
             .{ .name = "tracy", .module = tracy_module },
+            .{ .name = "extended-zccs", .module = extended_zccs },
             .{ .name = "build_options", .module = options.build_options },
             .{ .name = "version_data", .module = options.version_data },
         },
