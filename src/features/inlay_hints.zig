@@ -401,7 +401,8 @@ fn writeCallNodeHint(builder: *Builder, call: Ast.full.Call) !void {
     switch (tree.nodeTag(call.ast.fn_expr)) {
         .identifier, .field_access => try writeCallHint(builder, call),
         else => {
-            log.debug("cannot deduce fn expression with tag '{}'", .{tree.nodeTag(call.ast.fn_expr)});
+            // This becomes a very bandwith intensive warning
+            // log.debug("cannot deduce fn expression with tag '{}'", .{tree.nodeTag(call.ast.fn_expr)});
         },
     }
 }
