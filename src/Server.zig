@@ -331,9 +331,16 @@ fn generateDiagnostics(server: *Server, handle: *DocumentStore.Handle) void {
     if (!server.client_capabilities.supports_publish_diagnostics) return;
     const do = struct {
         fn do(param_server: *Server, param_handle: *DocumentStore.Handle) void {
+            if (param_handle.getChangePending() == true) {
+                std.log.err("!genDiag  : early exit", .{});
+                return;
+            }
+            const ns1: i64 = @intCast(std.time.nanoTimestamp());
             diagnostics_gen.generateDiagnostics(param_server, param_handle) catch |err| switch (err) {
                 error.OutOfMemory => {},
             };
+            const ns2: i64 = @intCast(std.time.nanoTimestamp());
+            std.log.err("genDiag in: {D}", .{ns2 - ns1});
         }
     }.do;
     server.thread_pool.spawnWg(&server.wait_group, do, .{ server, handle });
@@ -1147,9 +1154,10 @@ fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: ty
         notification.contentChanges,
         server.offset_encoding,
     );
+    handle.setChangePending(false);
 
     const ns2: i64 = @intCast(std.time.nanoTimestamp());
-    std.log.info("D: {D}", .{ns2 - ns1});
+    std.log.err("h.aCC   in: {D}", .{ns2 - ns1});
 
     server.generateDiagnostics(handle);
 }
@@ -1698,6 +1706,13 @@ pub fn loop(server: *Server) !void {
         }
 
         if (isBlockingMessage(message)) {
+            if (message == .notification and
+                message.notification.params == .@"textDocument/didChange")
+            {
+                if (server.document_store.getHandle(message.notification.params.@"textDocument/didChange".textDocument.uri)) |handle| {
+                    handle.setChangePending(true);
+                }
+            }
             server.thread_pool.waitAndWork(&server.wait_group);
             server.wait_group.reset();
             server.processMessageReportError(arena_allocator.state, message);

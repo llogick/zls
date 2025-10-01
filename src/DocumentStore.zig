@@ -186,6 +186,9 @@ pub const Handle = struct {
     /// Contains one entry for every cimport in the document
     cimports: std.MultiArrayList(CImportHandle),
 
+    // Set by the main thread / read by server.generateDiagnostics and AstCheck
+    change_pending: std.atomic.Value(bool) = .init(false),
+
     /// private field
     impl: struct {
         /// @bitCast from/to `Status`
@@ -401,7 +404,7 @@ pub const Handle = struct {
                         const tracy_zone = tracy.traceNamed(@src(), "AstGen.generate");
                         defer tracy_zone.end();
 
-                        var zir = try std.zig.AstGen.generate(allocator, handle.tree);
+                        var zir = try extd_zccs.AstCheck.generate(allocator, handle.tree, &handle.change_pending);
                         errdefer zir.deinit(allocator);
 
                         // remove unused capacity
@@ -581,6 +584,14 @@ pub const Handle = struct {
         } else {
             return self.impl.status.bitReset(@offsetOf(Handle.Status, "lsp_synced"), .release) == 1;
         }
+    }
+
+    pub fn setChangePending(self: *Handle, value: bool) void {
+        self.change_pending.store(value, .release);
+    }
+
+    pub fn getChangePending(self: *const Handle) bool {
+        return self.change_pending.load(.acquire);
     }
 
     fn createAst(allocator: std.mem.Allocator, new_text: [:0]const u8, kind: extd_zccs.Ast.Kind, is_lsp_synced: bool) error{OutOfMemory}!extd_zccs.Ast {
