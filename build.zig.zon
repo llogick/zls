@@ -25,9 +25,10 @@
             .hash = "lsp_kit-0.1.0-bi_PLzAyCgClDh8_M0U9Q50ysdsQBuRuBTZfwg6rZPd6",
         },
         .extended_zccs = .{
+            .url = "https://github.com/llogick/extended-zccs/archive/b786c4400040c4b10790ad93411e3bedc6793f0f.tar.gz",
+            .hash = "extended_zccs-0.16.0-dev-zEaUNrWyDgCGJWfSKWs28A5dh-qSX6l5GQ1G7NHVrte0",
             // For local dev
-            .path = "../extended-zccs",
-            // .url = "https://github.com/llogick/extended-zccs/archive/4fe762bab0a577eeedb45386744c69e1f8a3ce85.tar.gz",
+            // .path = "../extended-zccs",
         },
         .tracy = .{
             .url = "https://github.com/wolfpld/tracy/archive/refs/tags/v0.11.1.tar.gz",
