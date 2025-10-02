@@ -407,11 +407,6 @@ pub const Handle = struct {
                         var zir = try extd_zccs.AstCheck.generate(allocator, handle.tree, &handle.change_pending);
                         errdefer zir.deinit(allocator);
 
-                        // remove unused capacity
-                        var instructions = zir.instructions.toMultiArrayList();
-                        try instructions.setCapacity(allocator, instructions.len);
-                        zir.instructions = instructions.slice();
-
                         return .{ .zig = zir };
                     },
                     .zon => {
