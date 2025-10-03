@@ -279,23 +279,24 @@ pub fn getAstCheckDiagnostics(server: *Server, handle: *DocumentStore.Handle) er
     defer tracy_zone.end();
 
     std.debug.assert(handle.tree.errors.len == 0);
-    const config = &server.config_manager.config;
+    // const config = &server.config_manager.config;
 
-    if (std.process.can_spawn and
-        config.prefer_ast_check_as_child_process and
-        handle.tree.mode == .zig and // TODO pass `--zon` if available
-        config.zig_exe_path != null)
-    {
-        return getErrorBundleFromAstCheck(
-            server.allocator,
-            config.zig_exe_path.?,
-            &server.zig_ast_check_lock,
-            handle.tree.source,
-        ) catch |err| {
-            log.err("failed to run ast-check: {}", .{err});
-            return .empty;
-        };
-    } else switch (handle.tree.mode) {
+    // if (std.process.can_spawn and
+    //     config.prefer_ast_check_as_child_process and
+    //     handle.tree.mode == .zig and // TODO pass `--zon` if available
+    //     config.zig_exe_path != null)
+    // {
+    //     return getErrorBundleFromAstCheck(
+    //         server.allocator,
+    //         config.zig_exe_path.?,
+    //         &server.zig_ast_check_lock,
+    //         handle.tree.source,
+    //     ) catch |err| {
+    //         log.err("failed to run ast-check: {}", .{err});
+    //         return .empty;
+    //     };
+    // } else
+    switch (handle.tree.mode) {
         .zig => {
             const zir = try handle.getZir();
             if (!zir.hasCompileErrors()) return .empty;
