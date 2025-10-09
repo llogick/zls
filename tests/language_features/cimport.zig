@@ -11,6 +11,8 @@ const translate_c = zls.translate_c;
 const allocator: std.mem.Allocator = std.testing.allocator;
 
 test "zig compile server - translate c" {
+    if (true) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/25393
+
     var result1 = try testTranslate(
         \\void foo(int);
         \\void bar(float*);
@@ -18,7 +20,6 @@ test "zig compile server - translate c" {
     defer result1.deinit(allocator);
     try std.testing.expect(result1 == .success);
 
-    if (true) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/25393
     var result2 = try testTranslate(
         \\#include <this_file_doesnt_exist>
     );
