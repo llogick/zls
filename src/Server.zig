@@ -845,6 +845,7 @@ const Workspace = struct {
             .zig_lib_path = zig_lib_path,
             .build_runner_path = build_runner_path,
             .collection = &args.server.diagnostics_collection,
+            .document_store = &args.server.document_store,
         }) catch |err| {
             log.err("failed to initilize Build-On-Save for '{s}': {}", .{ workspace.uri, err });
             return;
