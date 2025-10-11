@@ -42,7 +42,7 @@ fn fromPathWithOs(
             'A'...'Z', 'a'...'z', '0'...'9',
             '-', '.', '_', '~',
             '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=',
-            '/', ':', '@',
+            '/', '@',
             // zig fmt: on
             => try buf.append(allocator, c),
             else => try buf.print(allocator, "%{X:0>2}", .{c}),
@@ -61,7 +61,7 @@ test "fromPath (posix)" {
 test "fromPath (windows)" {
     const uri = try fromPathWithOs(std.testing.allocator, "C:/main.zig", true);
     defer std.testing.allocator.free(uri);
-    try std.testing.expectEqualStrings("file:///c:/main.zig", uri);
+    try std.testing.expectEqualStrings("file:///c%3A/main.zig", uri);
 }
 
 test "fromPath - preserve '\\' (posix)" {
@@ -73,13 +73,13 @@ test "fromPath - preserve '\\' (posix)" {
 test "fromPath - convert '\\' to '/' (windows)" {
     const uri = try fromPathWithOs(std.testing.allocator, "C:\\main.zig", true);
     defer std.testing.allocator.free(uri);
-    try std.testing.expectEqualStrings("file:///c:/main.zig", uri);
+    try std.testing.expectEqualStrings("file:///c%3A/main.zig", uri);
 }
 
 test "fromPath - windows like path on posix" {
     const uri = try fromPathWithOs(std.testing.allocator, "/C:\\main.zig", false);
     defer std.testing.allocator.free(uri);
-    try std.testing.expectEqualStrings("file:///C:%5Cmain.zig", uri);
+    try std.testing.expectEqualStrings("file:///C%3A%5Cmain.zig", uri);
 }
 
 /// Converts a Uri to a file system path.
