@@ -267,7 +267,7 @@ pub const Handle = struct {
 
         const std_ast = custom_ast.toStdAst();
 
-        var cimports = try collectCIncludes(allocator, std_ast);
+        var cimports = try collectCIncludes(allocator, &std_ast);
         errdefer cimports.deinit(allocator);
 
         return .{
@@ -331,7 +331,7 @@ pub const Handle = struct {
 
         if (self.impl.import_uris) |import_uris| return import_uris;
 
-        var imports = try analysis.collectImports(allocator, self.tree);
+        var imports = try analysis.collectImports(allocator, &self.tree);
 
         var i: usize = 0;
         errdefer {
@@ -363,7 +363,7 @@ pub const Handle = struct {
         if (self.getStatus().has_document_scope) return self.impl.document_scope;
         return try self.getLazy(DocumentScope, "document_scope", struct {
             fn create(handle: *Handle, allocator: std.mem.Allocator) error{OutOfMemory}!DocumentScope {
-                var document_scope: DocumentScope = try .init(allocator, handle.tree);
+                var document_scope: DocumentScope = try .init(allocator, &handle.tree);
                 errdefer document_scope.deinit(allocator);
 
                 // remove unused capacity
@@ -667,7 +667,7 @@ pub const Handle = struct {
 
         self.impl.status = .init(@bitCast(Status{ .lsp_synced = self.isLspSynced() }));
         self.tree = self.ast.toStdAst();
-        self.cimports = try collectCIncludes(self.impl.allocator, self.tree);
+        self.cimports = try collectCIncludes(self.impl.allocator, &self.tree);
     }
 };
 
@@ -1463,7 +1463,7 @@ pub const CImportHandle = struct {
 
 /// Collects all `@cImport` nodes and converts them into c source code if possible
 /// Caller owns returned memory.
-fn collectCIncludes(allocator: std.mem.Allocator, tree: Ast) error{OutOfMemory}!std.MultiArrayList(CImportHandle) {
+fn collectCIncludes(allocator: std.mem.Allocator, tree: *const Ast) error{OutOfMemory}!std.MultiArrayList(CImportHandle) {
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
@@ -1728,7 +1728,7 @@ fn publishCimportDiagnostics(self: *DocumentStore, handle: *Handle) !void {
 
         if (error_bundle.errorMessageCount() == 0) continue;
 
-        const loc = offsets.nodeToLoc(handle.tree, node);
+        const loc = offsets.nodeToLoc(&handle.tree, node);
         const source_loc = std.zig.findLineColumn(handle.tree.source, loc.start);
 
         comptime std.debug.assert(max_document_size <= std.math.maxInt(u32));

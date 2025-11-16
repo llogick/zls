@@ -1384,7 +1384,7 @@ fn documentSymbolsHandler(server: *Server, arena: std.mem.Allocator, request: ty
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
     if (handle.tree.mode == .zon) return null;
     return .{
-        .array_of_DocumentSymbol = try document_symbol.getDocumentSymbols(arena, handle.tree, server.offset_encoding),
+        .array_of_DocumentSymbol = try document_symbol.getDocumentSymbols(arena, &handle.tree, server.offset_encoding),
     };
 }
 
@@ -1409,7 +1409,7 @@ fn renameHandler(server: *Server, arena: std.mem.Allocator, request: types.Renam
 fn prepareRenameHandler(server: *Server, request: types.PrepareRenameParams) ?types.PrepareRenameResult {
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
     const source_index = offsets.positionToIndex(handle.tree.source, request.position, server.offset_encoding);
-    const name_loc = Analyser.identifierLocFromIndex(handle.tree, source_index) orelse return null;
+    const name_loc = Analyser.identifierLocFromIndex(&handle.tree, source_index) orelse return null;
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     return .{
         .literal_1 = .{
@@ -1495,7 +1495,7 @@ fn codeActionHandler(server: *Server, arena: std.mem.Allocator, request: types.C
 fn foldingRangeHandler(server: *Server, arena: std.mem.Allocator, request: types.FoldingRangeParams) Error!?[]types.FoldingRange {
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
 
-    return try folding_range.generateFoldingRanges(arena, handle.tree, server.offset_encoding);
+    return try folding_range.generateFoldingRanges(arena, &handle.tree, server.offset_encoding);
 }
 
 fn selectionRangeHandler(server: *Server, arena: std.mem.Allocator, request: types.SelectionRangeParams) Error!?[]types.SelectionRange {
