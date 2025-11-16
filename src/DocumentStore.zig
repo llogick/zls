@@ -1620,7 +1620,7 @@ pub fn resolveCImport(self: *DocumentStore, handle: *Handle, node: Ast.Node.Inde
 
     // TODO regenerate cimports if the header files gets modified
 
-    const index = std.mem.indexOfScalar(Ast.Node.Index, handle.cimports.items(.node), node) orelse return null;
+    const index = std.mem.findScalar(Ast.Node.Index, handle.cimports.items(.node), node) orelse return null;
     const hash: Hash = handle.cimports.items(.hash)[index];
     const source = handle.cimports.items(.source)[index];
 
