@@ -336,12 +336,9 @@ fn generateDiagnostics(server: *Server, handle: *DocumentStore.Handle) void {
                 std.log.err("!genDiag  : early exit", .{});
                 return;
             }
-            const ns1: i64 = @intCast(std.time.nanoTimestamp());
             diagnostics_gen.generateDiagnostics(param_server, param_handle) catch |err| switch (err) {
                 error.OutOfMemory => {},
             };
-            const ns2: i64 = @intCast(std.time.nanoTimestamp());
-            std.log.err("genDiag in: {D}", .{ns2 - ns1});
         }
     }.do;
     server.thread_pool.spawnWg(&server.wait_group, do, .{ server, handle });
@@ -1151,16 +1148,11 @@ fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: ty
     if (notification.contentChanges.len == 0) return;
     const handle = server.document_store.getHandle(notification.textDocument.uri) orelse return;
 
-    const ns1: i64 = @intCast(std.time.nanoTimestamp());
-
     try handle.applyContentChanges(
         notification.contentChanges,
         server.offset_encoding,
     );
     handle.setChangePending(false);
-
-    const ns2: i64 = @intCast(std.time.nanoTimestamp());
-    std.log.err("h.aCC   in: {D}", .{ns2 - ns1});
 
     server.generateDiagnostics(handle);
 }
