@@ -279,23 +279,7 @@ pub fn getAstCheckDiagnostics(server: *Server, handle: *DocumentStore.Handle) er
     defer tracy_zone.end();
 
     std.debug.assert(handle.tree.errors.len == 0);
-    // const config = &server.config_manager.config;
 
-    // if (std.process.can_spawn and
-    //     config.prefer_ast_check_as_child_process and
-    //     handle.tree.mode == .zig and // TODO pass `--zon` if available
-    //     config.zig_exe_path != null)
-    // {
-    //     return getErrorBundleFromAstCheck(
-    //         server.allocator,
-    //         config.zig_exe_path.?,
-    //         &server.zig_ast_check_lock,
-    //         handle.tree.source,
-    //     ) catch |err| {
-    //         log.err("failed to run ast-check: {}", .{err});
-    //         return .empty;
-    //     };
-    // } else
     switch (handle.tree.mode) {
         .zig => {
             const zir = try handle.getZir();
@@ -321,6 +305,7 @@ pub fn getAstCheckDiagnostics(server: *Server, handle: *DocumentStore.Handle) er
 }
 
 fn getErrorBundleFromAstCheck(
+    io: std.Io,
     allocator: std.mem.Allocator,
     zig_exe_path: []const u8,
     zig_ast_check_lock: *std.Thread.Mutex,
@@ -352,7 +337,7 @@ fn getErrorBundleFromAstCheck(
 
         process.stdin = null;
 
-        stderr_bytes = try readToEndAlloc(process.stderr.?, allocator, .limited(16 * 1024 * 1024));
+        stderr_bytes = try readToEndAlloc(io, allocator, process.stderr.?, .limited(16 * 1024 * 1024));
 
         const term = process.wait() catch |err| {
             log.warn("Failed to await zig ast-check process, error: {}", .{err});
@@ -485,6 +470,7 @@ pub fn getErrorBundleFromStderr(
 }
 
 pub const BuildOnSave = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     child_process: *std.process.Child,
     thread: std.Thread,
@@ -493,6 +479,7 @@ pub const BuildOnSave = struct {
     const ServerToClient = shared.ServerToClient;
 
     pub const InitOptions = struct {
+        io: std.Io,
         allocator: std.mem.Allocator,
         workspace_path: []const u8,
         build_on_save_args: []const []const u8,
@@ -543,8 +530,9 @@ pub const BuildOnSave = struct {
 
         errdefer {
             _ = terminateChildProcessReportError(
-                child_process,
+                options.io,
                 options.allocator,
+                child_process,
                 "zig build runner",
                 .kill,
             );
@@ -567,6 +555,7 @@ pub const BuildOnSave = struct {
         errdefer comptime unreachable;
 
         return .{
+            .io = options.io,
             .allocator = options.allocator,
             .child_process = child_process,
             .thread = thread,
@@ -581,8 +570,9 @@ pub const BuildOnSave = struct {
         self.child_process.stdin = null;
 
         const success = terminateChildProcessReportError(
-            self.child_process,
+            self.io,
             self.allocator,
+            self.child_process,
             "zig build runner",
             .wait,
         );
@@ -655,16 +645,6 @@ pub const BuildOnSave = struct {
         }
 
         log.debug("zig build runner process has exited", .{});
-
-        const stderr = if (child_process.stderr) |stderr|
-            readToEndAlloc(stderr, allocator, .limited(16 * 1024 * 1024)) catch ""
-        else
-            "";
-        defer allocator.free(stderr);
-
-        if (stderr.len != 0) {
-            log.debug("build runner stderr:\n{s}", .{stderr});
-        }
     }
 
     fn handleWatchErrorBundle(
@@ -810,13 +790,14 @@ pub const BuildOnSave = struct {
 };
 
 fn terminateChildProcessReportError(
-    child_process: *std.process.Child,
+    io: std.Io,
     allocator: std.mem.Allocator,
+    child_process: *std.process.Child,
     name: []const u8,
     kind: enum { wait, kill },
 ) bool {
     const stderr = if (child_process.stderr) |stderr|
-        readToEndAlloc(stderr, allocator, .limited(16 * 1024 * 1024)) catch ""
+        readToEndAlloc(io, allocator, stderr, .limited(16 * 1024 * 1024)) catch ""
     else
         "";
     defer allocator.free(stderr);
@@ -850,12 +831,13 @@ fn terminateChildProcessReportError(
 }
 
 fn readToEndAlloc(
-    file: std.fs.File,
+    io: std.Io,
     allocator: std.mem.Allocator,
+    file: std.fs.File,
     limit: std.Io.Limit,
 ) (std.fs.File.ReadError || error{ OutOfMemory, StreamTooLong })![]u8 {
     var buffer: [1024]u8 = undefined;
-    var file_reader = file.readerStreaming(&buffer);
+    var file_reader = file.readerStreaming(io, &buffer);
     return file_reader.interface.allocRemaining(allocator, limit) catch |err| switch (err) {
         error.ReadFailed => return file_reader.err.?,
         error.OutOfMemory, error.StreamTooLong => |e| return e,

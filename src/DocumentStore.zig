@@ -18,6 +18,7 @@ const DiagnosticsCollection = @import("DiagnosticsCollection.zig");
 
 const DocumentStore = @This();
 
+io: std.Io,
 allocator: std.mem.Allocator,
 /// the DocumentStore assumes that `config` is not modified while calling one of its functions.
 config: Config,
@@ -1661,6 +1662,7 @@ pub fn resolveCImport(self: *DocumentStore, handle: *Handle, node: Ast.Node.Inde
     };
 
     const maybe_result = translate_c.translate(
+        self.io,
         self.allocator,
         self.config,
         include_dirs.items,
