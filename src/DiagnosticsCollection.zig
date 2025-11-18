@@ -222,11 +222,11 @@ pub fn clearSingleDocumentDiagnostics(collection: *DiagnosticsCollection, docume
         kv.value.arena.promote(collection.allocator).deinit();
         kv.value.error_bundle.deinit(collection.allocator);
 
-        // const gop = collection.outdated_files.getOrPut(collection.allocator, kv.key) catch {
-        //     kv.key.deinit(collection.allocator);
-        //     continue;
-        // };
-        // if (gop.found_existing) kv.key.deinit(collection.allocator);
+        const gop = collection.outdated_files.getOrPut(collection.allocator, kv.key) catch {
+            collection.allocator.free(kv.key);
+            continue;
+        };
+        if (gop.found_existing) collection.allocator.free(kv.key);
     }
 }
 
