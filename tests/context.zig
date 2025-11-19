@@ -102,10 +102,10 @@ pub const Context = struct {
             break :uri try zls.URI.fromPath(self.arena.allocator(), path);
         };
 
-        const params: types.DidOpenTextDocumentParams = .{
+        const params: types.TextDocument.DidOpenParams = .{
             .textDocument = .{
                 .uri = uri,
-                .languageId = "zig",
+                .languageId = .{ .custom_value = "zig" },
                 .version = 420,
                 .text = options.source,
             },
