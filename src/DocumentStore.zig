@@ -607,7 +607,7 @@ pub const Handle = struct {
 
     pub fn applyContentChanges(
         self: *Handle,
-        content_changes: []const lsp.types.TextDocumentContentChangeEvent,
+        content_changes: []const lsp.types.TextDocument.ContentChangeEvent,
         encoding: offsets.Encoding,
     ) error{ OutOfMemory, InternalError }!void {
         const tracy_zone = tracy.trace(@src());
@@ -623,10 +623,8 @@ pub const Handle = struct {
             var i: u32 = @intCast(content_changes.len -| 1);
             while (i != 0) : (i -= 1) {
                 switch (content_changes[i]) {
-                    // TextDocumentContentChangePartial
-                    .literal_0 => continue,
-                    // TextDocumentContentChangeWholeDocument
-                    .literal_1 => |content_change| {
+                    .text_document_content_change_partial => continue,
+                    .text_document_content_change_whole_document => |content_change| {
                         try self.ast.bytes.replaceRange(self.ast.gpa, 0, self.ast.bytes.items.len - 1, content_change.text);
                         break :blk .{ 0, @intCast(self.ast.bytes.items.len - 1), i };
                     },
@@ -639,7 +637,7 @@ pub const Handle = struct {
         const changes = content_changes[if (last_full_text_index) |index| index + 1 else 0..];
 
         for (changes) |item| {
-            const content_change = item.literal_0; // TextDocumentContentChangePartial
+            const content_change = item.text_document_content_change_partial;
 
             const loc = offsets.rangeToLoc(self.ast.bytes.items, content_change.range, encoding);
 
@@ -949,7 +947,7 @@ fn notifyBuildStart(self: *DocumentStore) void {
             .jsonrpc = "2.0",
             .id = "progress",
             .method = "window/workDoneProgress/create",
-            .params = lsp.types.WorkDoneProgressCreateParams{
+            .params = lsp.types.window.work_done_progress.CreateParams{
                 .token = .{ .string = progress_token },
             },
         },
@@ -963,7 +961,7 @@ fn notifyBuildStart(self: *DocumentStore) void {
         .method = "$/progress",
         .params = .{
             .token = progress_token,
-            .value = lsp.types.WorkDoneProgressBegin{
+            .value = lsp.types.window.work_done_progress.Begin{
                 .title = "Loading build configuration",
             },
         },
@@ -996,7 +994,7 @@ fn notifyBuildEnd(self: *DocumentStore, status: EndStatus) void {
         .method = "$/progress",
         .params = .{
             .token = progress_token,
-            .value = lsp.types.WorkDoneProgressEnd{
+            .value = lsp.types.window.work_done_progress.End{
                 .message = message,
             },
         },

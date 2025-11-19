@@ -57,7 +57,7 @@ ip: InternPool = undefined,
 /// See https://github.com/ziglang/zig/issues/16369
 zig_ast_check_lock: std.Thread.Mutex = .{},
 /// Stores messages that should be displayed with `window/showMessage` once the server has been initialized.
-pending_show_messages: std.ArrayList(types.ShowMessageParams) = .empty,
+pending_show_messages: std.ArrayList(types.window.ShowMessageParams) = .empty,
 client_capabilities: ClientCapabilities = .{},
 diagnostics_collection: DiagnosticsCollection,
 workspaces: std.ArrayList(Workspace) = .empty,
@@ -229,7 +229,7 @@ fn sendToClientInternal(allocator: std.mem.Allocator, transport: ?*lsp.Transport
 /// Send a `window/showMessage` notification to the client that will display a message in the user interface.
 pub fn showMessage(
     server: *Server,
-    message_type: types.MessageType,
+    message_type: types.window.MessageType,
     comptime fmt: []const u8,
     args: anytype,
 ) void {
@@ -260,7 +260,7 @@ pub fn showMessage(
         .exiting_failure,
         => return,
     }
-    if (server.sendToClientNotification("window/showMessage", types.ShowMessageParams{
+    if (server.sendToClientNotification("window/showMessage", types.window.ShowMessageParams{
         .type = message_type,
         .message = message,
     })) |json_message| {
@@ -534,7 +534,7 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
                 .retriggerCharacters = &.{","},
             },
             .textDocumentSync = .{
-                .TextDocumentSyncOptions = .{
+                .text_document_sync_options = .{
                     .openClose = true,
                     .change = .Incremental,
                     .save = .{ .bool = true },
@@ -542,7 +542,7 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
                 },
             },
             .renameProvider = .{
-                .RenameOptions = .{ .prepareProvider = true },
+                .rename_options = .{ .prepareProvider = true },
             },
             .completionProvider = .{
                 .resolveProvider = false,
@@ -551,7 +551,7 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
             },
             .documentHighlightProvider = .{ .bool = true },
             .hoverProvider = .{ .bool = true },
-            .codeActionProvider = .{ .CodeActionOptions = .{ .codeActionKinds = code_actions.supported_code_actions } },
+            .codeActionProvider = .{ .code_action_options = .{ .codeActionKinds = code_actions.supported_code_actions } },
             .declarationProvider = .{ .bool = true },
             .definitionProvider = .{ .bool = true },
             .typeDefinitionProvider = .{ .bool = true },
@@ -571,7 +571,7 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
                 },
             },
             .semanticTokensProvider = .{
-                .SemanticTokensOptions = .{
+                .semantic_tokens_options = .{
                     .full = .{ .bool = support_full_semantic_tokens },
                     .range = .{ .bool = true },
                     .legend = .{
@@ -651,7 +651,7 @@ fn registerCapability(server: *Server, method: []const u8, registersOptions: ?ty
     const json_message = try server.sendToClientRequest(
         .{ .string = id },
         "client/registerCapability",
-        types.RegistrationParams{ .registrations = &.{
+        types.Registration.Params{ .registrations = &.{
             .{
                 .id = id,
                 .method = method,
@@ -664,7 +664,7 @@ fn registerCapability(server: *Server, method: []const u8, registersOptions: ?ty
 
 /// Request configuration options with the `workspace/configuration` request.
 fn requestConfiguration(server: *Server) Error!void {
-    const configuration_items: [1]types.ConfigurationItem = .{
+    const configuration_items: [1]types.workspace.configuration.Item = .{
         .{
             .section = "zls",
             .scopeUri = if (server.workspaces.items.len == 1) server.workspaces.items[0].uri else null,
@@ -674,7 +674,7 @@ fn requestConfiguration(server: *Server) Error!void {
     const json_message = try server.sendToClientRequest(
         .{ .string = "i_haz_configuration" },
         "workspace/configuration",
-        types.ConfigurationParams{
+        types.workspace.configuration.Params{
             .items = &configuration_items,
         },
     );
@@ -885,7 +885,7 @@ fn removeWorkspace(server: *Server, uri: types.URI) void {
     }
 }
 
-fn didChangeWatchedFilesHandler(server: *Server, arena: std.mem.Allocator, notification: types.DidChangeWatchedFilesParams) Error!void {
+fn didChangeWatchedFilesHandler(server: *Server, arena: std.mem.Allocator, notification: types.workspace.did_change_watched_files.Params) Error!void {
     var updated_files: usize = 0;
     for (notification.changes) |change| {
         const file_path = Uri.toFsPath(arena, change.uri) catch |err| switch (err) {
@@ -914,7 +914,7 @@ fn didChangeWatchedFilesHandler(server: *Server, arena: std.mem.Allocator, notif
     }
 }
 
-fn didChangeWorkspaceFoldersHandler(server: *Server, arena: std.mem.Allocator, notification: types.DidChangeWorkspaceFoldersParams) Error!void {
+fn didChangeWorkspaceFoldersHandler(server: *Server, arena: std.mem.Allocator, notification: types.workspace.folders.DidChangeParams) Error!void {
     _ = arena;
 
     for (notification.event.added) |folder| {
@@ -926,7 +926,7 @@ fn didChangeWorkspaceFoldersHandler(server: *Server, arena: std.mem.Allocator, n
     }
 }
 
-fn didChangeConfigurationHandler(server: *Server, arena: std.mem.Allocator, notification: types.DidChangeConfigurationParams) Error!void {
+fn didChangeConfigurationHandler(server: *Server, arena: std.mem.Allocator, notification: types.workspace.configuration.did_change.Params) Error!void {
     const settings = switch (notification.settings) {
         .null => {
             if (server.client_capabilities.supports_configuration and
@@ -1130,7 +1130,7 @@ fn createDocumentStoreConfig(config_manager: *const configuration.Manager) Docum
     };
 }
 
-fn openDocumentHandler(server: *Server, _: std.mem.Allocator, notification: types.DidOpenTextDocumentParams) Error!void {
+fn openDocumentHandler(server: *Server, _: std.mem.Allocator, notification: types.TextDocument.DidOpenParams) Error!void {
     if (notification.textDocument.text.len > DocumentStore.max_document_size) {
         log.err("open document '{s}' failed: text size ({d}) is above maximum length ({d})", .{
             notification.textDocument.uri,
@@ -1144,7 +1144,7 @@ fn openDocumentHandler(server: *Server, _: std.mem.Allocator, notification: type
     server.generateDiagnostics(server.document_store.getHandle(notification.textDocument.uri).?);
 }
 
-fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: types.DidChangeTextDocumentParams) Error!void {
+fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: types.TextDocument.DidChangeParams) Error!void {
     if (notification.contentChanges.len == 0) return;
     const handle = server.document_store.getHandle(notification.textDocument.uri) orelse return;
 
@@ -1157,7 +1157,7 @@ fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: ty
     server.generateDiagnostics(handle);
 }
 
-fn saveDocumentHandler(server: *Server, arena: std.mem.Allocator, notification: types.DidSaveTextDocumentParams) Error!void {
+fn saveDocumentHandler(server: *Server, arena: std.mem.Allocator, notification: types.TextDocument.DidSaveParams) Error!void {
     const uri = notification.textDocument.uri;
 
     if (std.process.can_spawn and DocumentStore.isBuildFile(uri)) {
@@ -1174,7 +1174,7 @@ fn saveDocumentHandler(server: *Server, arena: std.mem.Allocator, notification: 
         const json_message = try server.sendToClientRequest(
             .{ .string = "apply_edit" },
             "workspace/applyEdit",
-            types.ApplyWorkspaceEditParams{
+            types.workspace.apply_workspace_edit.Params{
                 .label = "autofix",
                 .edit = workspace_edit,
             },
@@ -1189,7 +1189,7 @@ fn saveDocumentHandler(server: *Server, arena: std.mem.Allocator, notification: 
     }
 }
 
-fn closeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: types.DidCloseTextDocumentParams) error{}!void {
+fn closeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: types.TextDocument.DidCloseParams) error{}!void {
     server.document_store.closeLspSyncedDocument(notification.textDocument.uri);
 
     if (server.client_capabilities.supports_publish_diagnostics) {
@@ -1200,7 +1200,7 @@ fn closeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: typ
     }
 }
 
-fn willSaveWaitUntilHandler(server: *Server, arena: std.mem.Allocator, request: types.WillSaveTextDocumentParams) Error!?[]types.TextEdit {
+fn willSaveWaitUntilHandler(server: *Server, arena: std.mem.Allocator, request: types.TextDocument.WillSaveParams) Error!?[]types.TextEdit {
     if (server.autofixWorkaround() != .will_save_wait_until) return null;
 
     switch (request.reason) {
@@ -1218,7 +1218,7 @@ fn willSaveWaitUntilHandler(server: *Server, arena: std.mem.Allocator, request: 
     return try text_edits.toOwnedSlice(arena);
 }
 
-fn semanticTokensFullHandler(server: *Server, arena: std.mem.Allocator, request: types.SemanticTokensParams) Error!?types.SemanticTokens {
+fn semanticTokensFullHandler(server: *Server, arena: std.mem.Allocator, request: types.semantic_tokens.Params) Error!?types.semantic_tokens.Result {
     if (server.config_manager.config.semantic_tokens == .none) return null;
 
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
@@ -1243,7 +1243,7 @@ fn semanticTokensFullHandler(server: *Server, arena: std.mem.Allocator, request:
     );
 }
 
-fn semanticTokensRangeHandler(server: *Server, arena: std.mem.Allocator, request: types.SemanticTokensRangeParams) Error!?types.SemanticTokens {
+fn semanticTokensRangeHandler(server: *Server, arena: std.mem.Allocator, request: types.semantic_tokens.Params.Range) Error!?types.semantic_tokens.Result {
     if (server.config_manager.config.semantic_tokens == .none) return null;
 
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
@@ -1270,7 +1270,7 @@ fn semanticTokensRangeHandler(server: *Server, arena: std.mem.Allocator, request
     );
 }
 
-fn completionHandler(server: *Server, arena: std.mem.Allocator, request: types.CompletionParams) Error!lsp.ResultType("textDocument/completion") {
+fn completionHandler(server: *Server, arena: std.mem.Allocator, request: types.completion.Params) Error!lsp.ResultType("textDocument/completion") {
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
     if (handle.tree.mode == .zon) return null;
 
@@ -1280,11 +1280,11 @@ fn completionHandler(server: *Server, arena: std.mem.Allocator, request: types.C
     defer analyser.deinit();
 
     return .{
-        .CompletionList = try completions.completionAtIndex(server, &analyser, arena, handle, source_index) orelse return null,
+        .completion_list = try completions.completionAtIndex(server, &analyser, arena, handle, source_index) orelse return null,
     };
 }
 
-fn signatureHelpHandler(server: *Server, arena: std.mem.Allocator, request: types.SignatureHelpParams) Error!?types.SignatureHelp {
+fn signatureHelpHandler(server: *Server, arena: std.mem.Allocator, request: types.SignatureHelp.Params) Error!?types.SignatureHelp {
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
     if (handle.tree.mode == .zon) return null;
 
@@ -1303,7 +1303,7 @@ fn signatureHelpHandler(server: *Server, arena: std.mem.Allocator, request: type
         markup_kind,
     )) orelse return null;
 
-    var signatures = try arena.alloc(types.SignatureInformation, 1);
+    var signatures = try arena.alloc(types.SignatureHelp.Signature, 1);
     signatures[0] = signature_info;
 
     return .{
@@ -1316,51 +1316,39 @@ fn signatureHelpHandler(server: *Server, arena: std.mem.Allocator, request: type
 fn gotoDefinitionHandler(
     server: *Server,
     arena: std.mem.Allocator,
-    request: types.DefinitionParams,
-) Error!lsp.ResultType("textDocument/definition") {
+    request: types.Definition.Params,
+) Error!?types.Definition.Result {
     return goto.gotoHandler(server, arena, .definition, request);
 }
 
-fn gotoTypeDefinitionHandler(server: *Server, arena: std.mem.Allocator, request: types.TypeDefinitionParams) Error!lsp.ResultType("textDocument/typeDefinition") {
-    const response = (try goto.gotoHandler(server, arena, .type_definition, .{
+fn gotoTypeDefinitionHandler(server: *Server, arena: std.mem.Allocator, request: types.type_definition.Params) Error!?types.Definition.Result {
+    return try goto.gotoHandler(server, arena, .type_definition, .{
         .textDocument = request.textDocument,
         .position = request.position,
         .workDoneToken = request.workDoneToken,
         .partialResultToken = request.partialResultToken,
-    })) orelse return null;
-    return switch (response) {
-        .array_of_DefinitionLink => |adl| .{ .array_of_DefinitionLink = adl },
-        .Definition => |def| .{ .Definition = def },
-    };
+    });
 }
 
-fn gotoImplementationHandler(server: *Server, arena: std.mem.Allocator, request: types.ImplementationParams) Error!lsp.ResultType("textDocument/implementation") {
-    const response = (try goto.gotoHandler(server, arena, .definition, .{
+fn gotoImplementationHandler(server: *Server, arena: std.mem.Allocator, request: types.implementation.Params) Error!?types.Definition.Result {
+    return try goto.gotoHandler(server, arena, .definition, .{
         .textDocument = request.textDocument,
         .position = request.position,
         .workDoneToken = request.workDoneToken,
         .partialResultToken = request.partialResultToken,
-    })) orelse return null;
-    return switch (response) {
-        .array_of_DefinitionLink => |adl| .{ .array_of_DefinitionLink = adl },
-        .Definition => |def| .{ .Definition = def },
-    };
+    });
 }
 
-fn gotoDeclarationHandler(server: *Server, arena: std.mem.Allocator, request: types.DeclarationParams) Error!lsp.ResultType("textDocument/declaration") {
-    const response = (try goto.gotoHandler(server, arena, .declaration, .{
+fn gotoDeclarationHandler(server: *Server, arena: std.mem.Allocator, request: types.declaration.Params) Error!?types.Definition.Result {
+    return try goto.gotoHandler(server, arena, .declaration, .{
         .textDocument = request.textDocument,
         .position = request.position,
         .workDoneToken = request.workDoneToken,
         .partialResultToken = request.partialResultToken,
-    })) orelse return null;
-    return switch (response) {
-        .array_of_DefinitionLink => |adl| .{ .array_of_DeclarationLink = adl },
-        .Definition => |def| .{ .Declaration = .{ .Location = def.Location } },
-    };
+    });
 }
 
-fn hoverHandler(server: *Server, arena: std.mem.Allocator, request: types.HoverParams) Error!?types.Hover {
+fn hoverHandler(server: *Server, arena: std.mem.Allocator, request: types.Hover.Params) Error!?types.Hover {
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
     if (handle.tree.mode == .zon) return null;
     const source_index = offsets.positionToIndex(handle.tree.source, request.position, server.offset_encoding);
@@ -1380,17 +1368,16 @@ fn hoverHandler(server: *Server, arena: std.mem.Allocator, request: types.HoverP
     );
 }
 
-fn documentSymbolsHandler(server: *Server, arena: std.mem.Allocator, request: types.DocumentSymbolParams) Error!lsp.ResultType("textDocument/documentSymbol") {
+fn documentSymbolsHandler(server: *Server, arena: std.mem.Allocator, request: types.DocumentSymbol.Params) Error!lsp.ResultType("textDocument/documentSymbol") {
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
     if (handle.tree.mode == .zon) return null;
     return .{
-        .array_of_DocumentSymbol = try document_symbol.getDocumentSymbols(arena, &handle.tree, server.offset_encoding),
+        .document_symbols = try document_symbol.getDocumentSymbols(arena, &handle.tree, server.offset_encoding),
     };
 }
 
-fn formattingHandler(server: *Server, arena: std.mem.Allocator, request: types.DocumentFormattingParams) Error!?[]types.TextEdit {
+fn formattingHandler(server: *Server, arena: std.mem.Allocator, request: types.document_formatting.Params) Error!?[]types.TextEdit {
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
-
     if (handle.tree.errors.len != 0) return null;
 
     const formatted = try handle.tree.renderAlloc(arena);
@@ -1401,35 +1388,36 @@ fn formattingHandler(server: *Server, arena: std.mem.Allocator, request: types.D
     return text_edits.items;
 }
 
-fn renameHandler(server: *Server, arena: std.mem.Allocator, request: types.RenameParams) Error!?types.WorkspaceEdit {
+fn renameHandler(server: *Server, arena: std.mem.Allocator, request: types.rename.Params) Error!?types.WorkspaceEdit {
     const response = try references.referencesHandler(server, arena, .{ .rename = request });
     return if (response) |rep| rep.rename else null;
 }
 
-fn prepareRenameHandler(server: *Server, request: types.PrepareRenameParams) ?types.PrepareRenameResult {
+fn prepareRenameHandler(server: *Server, request: types.prepare_rename.Params) Error!?types.prepare_rename.Result {
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
+
     const source_index = offsets.positionToIndex(handle.tree.source, request.position, server.offset_encoding);
     const name_loc = Analyser.identifierLocFromIndex(&handle.tree, source_index) orelse return null;
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     return .{
-        .literal_1 = .{
+        .prepare_rename_placeholder = .{
             .range = offsets.locToRange(handle.tree.source, name_loc, server.offset_encoding),
             .placeholder = name,
         },
     };
 }
 
-fn referencesHandler(server: *Server, arena: std.mem.Allocator, request: types.ReferenceParams) Error!?[]types.Location {
+fn referencesHandler(server: *Server, arena: std.mem.Allocator, request: types.reference.Params) Error!?[]types.Location {
     const response = try references.referencesHandler(server, arena, .{ .references = request });
     return if (response) |rep| rep.references else null;
 }
 
-fn documentHighlightHandler(server: *Server, arena: std.mem.Allocator, request: types.DocumentHighlightParams) Error!?[]types.DocumentHighlight {
+fn documentHighlightHandler(server: *Server, arena: std.mem.Allocator, request: types.DocumentHighlight.Params) Error!?[]types.DocumentHighlight {
     const response = try references.referencesHandler(server, arena, .{ .highlight = request });
     return if (response) |rep| rep.highlight else null;
 }
 
-fn inlayHintHandler(server: *Server, arena: std.mem.Allocator, request: types.InlayHintParams) Error!?[]types.InlayHint {
+fn inlayHintHandler(server: *Server, arena: std.mem.Allocator, request: types.InlayHint.Params) Error!?[]types.InlayHint {
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
     if (handle.tree.mode == .zon) return null;
 
@@ -1451,7 +1439,7 @@ fn inlayHintHandler(server: *Server, arena: std.mem.Allocator, request: types.In
     );
 }
 
-fn codeActionHandler(server: *Server, arena: std.mem.Allocator, request: types.CodeActionParams) Error!lsp.ResultType("textDocument/codeAction") {
+fn codeActionHandler(server: *Server, arena: std.mem.Allocator, request: types.CodeAction.Params) Error!lsp.ResultType("textDocument/codeAction") {
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
 
     // as of right now, only ast-check errors may get a code action
@@ -1465,7 +1453,7 @@ fn codeActionHandler(server: *Server, arena: std.mem.Allocator, request: types.C
     defer analyser.deinit();
 
     const only_kinds = if (request.context.only) |kinds| blk: {
-        var set: std.EnumSet(std.meta.Tag(types.CodeActionKind)) = .initEmpty();
+        var set: std.EnumSet(std.meta.Tag(types.CodeAction.Kind)) = .initEmpty();
         for (kinds) |kind| {
             set.setPresent(kind, true);
         }
@@ -1483,63 +1471,61 @@ fn codeActionHandler(server: *Server, arena: std.mem.Allocator, request: types.C
     try builder.generateCodeAction(error_bundle);
     try builder.generateCodeActionsInRange(request.range);
 
-    const Result = lsp.ResultType("textDocument/codeAction");
-    const result = try arena.alloc(std.meta.Child(std.meta.Child(Result)), builder.actions.items.len);
+    const result = try arena.alloc(types.CodeAction.Result, builder.actions.items.len);
     for (builder.actions.items, result) |action, *out| {
-        out.* = .{ .CodeAction = action };
+        out.* = .{ .code_action = action };
     }
 
     return result;
 }
 
-fn foldingRangeHandler(server: *Server, arena: std.mem.Allocator, request: types.FoldingRangeParams) Error!?[]types.FoldingRange {
+fn foldingRangeHandler(server: *Server, arena: std.mem.Allocator, request: types.FoldingRange.Params) Error!?[]types.FoldingRange {
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
 
     return try folding_range.generateFoldingRanges(arena, &handle.tree, server.offset_encoding);
 }
 
-fn selectionRangeHandler(server: *Server, arena: std.mem.Allocator, request: types.SelectionRangeParams) Error!?[]types.SelectionRange {
+fn selectionRangeHandler(server: *Server, arena: std.mem.Allocator, request: types.SelectionRange.Params) Error!?[]types.SelectionRange {
     const handle = server.document_store.getHandle(request.textDocument.uri) orelse return null;
-
     return try selection_range.generateSelectionRanges(arena, handle, request.positions, server.offset_encoding);
 }
 
 const HandledRequestParams = union(enum) {
     initialize: types.InitializeParams,
     shutdown,
-    @"textDocument/willSaveWaitUntil": types.WillSaveTextDocumentParams,
-    @"textDocument/semanticTokens/full": types.SemanticTokensParams,
-    @"textDocument/semanticTokens/range": types.SemanticTokensRangeParams,
-    @"textDocument/inlayHint": types.InlayHintParams,
-    @"textDocument/completion": types.CompletionParams,
-    @"textDocument/signatureHelp": types.SignatureHelpParams,
-    @"textDocument/definition": types.DefinitionParams,
-    @"textDocument/typeDefinition": types.TypeDefinitionParams,
-    @"textDocument/implementation": types.ImplementationParams,
-    @"textDocument/declaration": types.DeclarationParams,
-    @"textDocument/hover": types.HoverParams,
-    @"textDocument/documentSymbol": types.DocumentSymbolParams,
-    @"textDocument/formatting": types.DocumentFormattingParams,
-    @"textDocument/rename": types.RenameParams,
-    @"textDocument/prepareRename": types.PrepareRenameParams,
-    @"textDocument/references": types.ReferenceParams,
-    @"textDocument/documentHighlight": types.DocumentHighlightParams,
-    @"textDocument/codeAction": types.CodeActionParams,
-    @"textDocument/foldingRange": types.FoldingRangeParams,
-    @"textDocument/selectionRange": types.SelectionRangeParams,
+    @"textDocument/willSaveWaitUntil": types.TextDocument.WillSaveParams,
+    @"textDocument/semanticTokens/full": types.semantic_tokens.Params,
+    @"textDocument/semanticTokens/range": types.semantic_tokens.Params.Range,
+    @"textDocument/inlayHint": types.InlayHint.Params,
+    @"textDocument/completion": types.completion.Params,
+    @"textDocument/signatureHelp": types.SignatureHelp.Params,
+    @"textDocument/definition": types.Definition.Params,
+    @"textDocument/typeDefinition": types.type_definition.Params,
+    @"textDocument/implementation": types.implementation.Params,
+    @"textDocument/declaration": types.declaration.Params,
+    @"textDocument/hover": types.Hover.Params,
+    @"textDocument/documentSymbol": types.DocumentSymbol.Params,
+    @"textDocument/formatting": types.document_formatting.Params,
+    @"textDocument/rename": types.rename.Params,
+    @"textDocument/prepareRename": types.prepare_rename.Params,
+    @"textDocument/references": types.reference.Params,
+    @"textDocument/documentHighlight": types.DocumentHighlight.Params,
+    @"textDocument/codeAction": types.CodeAction.Params,
+    @"textDocument/foldingRange": types.FoldingRange.Params,
+    @"textDocument/selectionRange": types.SelectionRange.Params,
     other: lsp.MethodWithParams,
 };
 
 const HandledNotificationParams = union(enum) {
     initialized: types.InitializedParams,
     exit,
-    @"textDocument/didOpen": types.DidOpenTextDocumentParams,
-    @"textDocument/didChange": types.DidChangeTextDocumentParams,
-    @"textDocument/didSave": types.DidSaveTextDocumentParams,
-    @"textDocument/didClose": types.DidCloseTextDocumentParams,
-    @"workspace/didChangeWatchedFiles": types.DidChangeWatchedFilesParams,
-    @"workspace/didChangeWorkspaceFolders": types.DidChangeWorkspaceFoldersParams,
-    @"workspace/didChangeConfiguration": types.DidChangeConfigurationParams,
+    @"textDocument/didOpen": types.TextDocument.DidOpenParams,
+    @"textDocument/didChange": types.TextDocument.DidChangeParams,
+    @"textDocument/didSave": types.TextDocument.DidSaveParams,
+    @"textDocument/didClose": types.TextDocument.DidCloseParams,
+    @"workspace/didChangeWatchedFiles": types.workspace.did_change_watched_files.Params,
+    @"workspace/didChangeWorkspaceFolders": types.workspace.folders.DidChangeParams,
+    @"workspace/didChangeConfiguration": types.workspace.configuration.did_change.Params,
     other: lsp.MethodWithParams,
 };
 
