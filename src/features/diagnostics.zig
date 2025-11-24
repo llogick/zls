@@ -659,19 +659,21 @@ pub const BuildOnSave = struct {
 
         const header = reader.takeStruct(ServerToClient.ErrorBundle, .little) catch return error.InvalidMessage;
 
-        const extra = reader.readSliceEndianAlloc(allocator, u32, header.extra_len, .little) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.EndOfStream => return error.InvalidMessage,
-            error.ReadFailed => unreachable,
-        };
-        defer allocator.free(extra);
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
 
-        const string_bytes = reader.readAlloc(allocator, header.string_bytes_len) catch |err| switch (err) {
+        const extra = reader.readSliceEndianAlloc(arena, u32, header.extra_len, .little) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.EndOfStream => return error.InvalidMessage,
             error.ReadFailed => unreachable,
         };
-        defer allocator.free(string_bytes);
+
+        const string_bytes = reader.readAlloc(arena, header.string_bytes_len) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.EndOfStream => return error.InvalidMessage,
+            error.ReadFailed => unreachable,
+        };
 
         if (reader.bufferedLen() != 0) return error.InvalidMessage; // ensure that we read the entire body
 
@@ -694,11 +696,10 @@ pub const BuildOnSave = struct {
                 const src_path = eb.nullTerminatedString(err_src_loc.src_path);
 
                 const uri = try DiagnosticsCollection.pathToUri(
-                    allocator,
+                    arena,
                     workspace_path,
                     src_path,
                 ) orelse continue;
-                defer allocator.free(uri);
 
                 const doc_is_open_in_editor = if (ds.getHandle(uri)) |doc| doc.isLspSynced() else false;
                 if (doc_is_open_in_editor) continue;
@@ -730,29 +731,24 @@ pub const BuildOnSave = struct {
                         const ref_src_path = eb.nullTerminatedString(ref_src_loc.src_path);
 
                         const ref_uri = try DiagnosticsCollection.pathToUri(
-                            allocator,
+                            arena,
                             workspace_path,
                             ref_src_path,
                         ) orelse continue;
 
-                        defer allocator.free(ref_uri);
-
                         if ((if (ds.getHandle(ref_uri)) |doc| doc.isLspSynced() else false)) {
                             var wip_eb: std.zig.ErrorBundle.Wip = undefined;
 
-                            try wip_eb.init(allocator);
-                            defer wip_eb.deinit();
+                            try wip_eb.init(arena);
 
                             const msg = try std.fmt.allocPrint(
-                                allocator,
+                                arena,
                                 "(RTE#{}) {s}",
                                 .{
                                     i + 1,
                                     eb.nullTerminatedString(err_msg.msg),
                                 },
                             );
-
-                            defer allocator.free(msg);
 
                             try wip_eb.addRootErrorMessage(.{
                                 .msg = try wip_eb.addString(msg),
@@ -770,14 +766,11 @@ pub const BuildOnSave = struct {
                                 .notes_len = 0,
                             });
 
-                            var owned_eb = try wip_eb.toOwnedBundle("");
-                            defer owned_eb.deinit(allocator);
-
                             try collection.pushErrorBundle(
                                 diagnostic_tag,
                                 header.cycle,
                                 workspace_path,
-                                owned_eb,
+                                try wip_eb.toOwnedBundle(""),
                             );
 
                             break;
