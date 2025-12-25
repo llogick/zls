@@ -22,10 +22,10 @@ io: std.Io,
 allocator: std.mem.Allocator,
 /// the DocumentStore assumes that `config` is not modified while calling one of its functions.
 config: Config,
-lock: std.Thread.RwLock = .{},
-thread_pool: *std.Thread.Pool,
-handles: std.StringArrayHashMapUnmanaged(*Handle) = .empty,
-build_files: if (supports_build_system) std.StringArrayHashMapUnmanaged(*BuildFile) else void = if (supports_build_system) .empty else {},
+mutex: std.Io.Mutex = .init,
+wait_group: if (supports_build_system) std.Io.Group else void = if (supports_build_system) .init else {},
+handles: Uri.ArrayHashMap(*Handle) = .empty,
+build_files: if (supports_build_system) Uri.ArrayHashMap(*BuildFile) else void = if (supports_build_system) .empty else {},
 cimports: if (supports_build_system) std.AutoArrayHashMapUnmanaged(Hash, translate_c.Result) else void = if (supports_build_system) .empty else {},
 diagnostics_collection: *DiagnosticsCollection,
 builds_in_progress: std.atomic.Value(i32) = .init(0),
@@ -73,7 +73,7 @@ pub const BuildFile = struct {
     /// config options extracted from zls.build.json
     build_associated_config: ?std.json.Parsed(BuildAssociatedConfig) = null,
     impl: struct {
-        mutex: std.Thread.Mutex = .{},
+        mutex: std.Io.Mutex = .init,
         build_runner_state: BuildRunnerState = .idle,
         version: u32 = 0,
         /// contains information extracted from running build.zig with a custom build runner
@@ -89,16 +89,16 @@ pub const BuildFile = struct {
         running_but_already_invalidated,
     };
 
-    pub fn tryLockConfig(self: *BuildFile) ?BuildConfig {
-        self.impl.mutex.lock();
+    pub fn tryLockConfig(self: *BuildFile, io: std.Io) ?BuildConfig {
+        self.impl.mutex.lockUncancelable(io);
         return if (self.impl.config) |cfg| cfg.value else {
-            self.impl.mutex.unlock();
+            self.impl.mutex.unlock(io);
             return null;
         };
     }
 
-    pub fn unlockConfig(self: *BuildFile) void {
-        self.impl.mutex.unlock();
+    pub fn unlockConfig(self: *BuildFile, io: std.Io) void {
+        self.impl.mutex.unlock(io);
     }
 
     /// Usage example:
@@ -112,14 +112,15 @@ pub const BuildFile = struct {
     /// ```
     pub fn collectBuildConfigPackageUris(
         self: *BuildFile,
+        io: std.Io,
         allocator: std.mem.Allocator,
         package_uris: *std.ArrayList(Uri),
     ) error{OutOfMemory}!bool {
         const tracy_zone = tracy.trace(@src());
         defer tracy_zone.end();
 
-        const build_config = self.tryLockConfig() orelse return false;
-        defer self.unlockConfig();
+        const build_config = self.tryLockConfig(io) orelse return false;
+        defer self.unlockConfig(io);
 
         try package_uris.ensureUnusedCapacity(allocator, build_config.packages.len);
         for (build_config.packages) |package| {
@@ -139,14 +140,15 @@ pub const BuildFile = struct {
     /// ```
     pub fn collectBuildConfigIncludePaths(
         self: *BuildFile,
+        io: std.Io,
         allocator: std.mem.Allocator,
         include_paths: *std.ArrayList([]const u8),
     ) !bool {
         const tracy_zone = tracy.trace(@src());
         defer tracy_zone.end();
 
-        const build_config = self.tryLockConfig() orelse return false;
-        defer self.unlockConfig();
+        const build_config = self.tryLockConfig(io) orelse return false;
+        defer self.unlockConfig(io);
 
         try include_paths.ensureUnusedCapacity(allocator, build_config.include_dirs.len);
         for (build_config.include_dirs) |include_path| {
@@ -190,12 +192,11 @@ pub const Handle = struct {
     impl: struct {
         /// @bitCast from/to `Status`
         status: std.atomic.Value(u32),
-        /// TODO can we avoid storing one allocator per Handle?
-        allocator: std.mem.Allocator,
+        store: *DocumentStore,
 
-        lock: std.Thread.Mutex = .{},
+        lock: std.Io.Mutex = .init,
         /// See `getLazy`
-        lazy_condition: std.Thread.Condition = .{},
+        lazy_condition: std.Io.Condition = .init,
 
         import_uris: ?[]Uri = null,
         document_scope: DocumentScope = undefined,
@@ -251,7 +252,7 @@ pub const Handle = struct {
 
     /// Takes ownership of `text` on success.
     pub fn init(
-        allocator: std.mem.Allocator,
+        store: *DocumentStore,
         uri: Uri,
         text: [:0]const u8,
         lsp_synced: bool,
@@ -275,7 +276,7 @@ pub const Handle = struct {
                 .status = .init(@bitCast(Status{
                     .lsp_synced = lsp_synced,
                 })),
-                .allocator = allocator,
+                .store = store,
             },
         };
     }
@@ -283,7 +284,7 @@ pub const Handle = struct {
     fn deinitAstDeps(self: *Handle) void {
         const status = self.getStatus();
 
-        const allocator = self.impl.allocator;
+        const allocator = self.impl.store.allocator;
 
         if (status.has_zzoiir) switch (self.tree.mode) {
             .zig => self.impl.zzoiir.zig.deinit(allocator),
@@ -320,10 +321,12 @@ pub const Handle = struct {
     }
 
     pub fn getImportUris(self: *Handle) error{OutOfMemory}![]const Uri {
-        self.impl.lock.lock();
-        defer self.impl.lock.unlock();
+        const store = self.impl.store;
+        const allocator = store.allocator;
+        const io = store.io;
 
-        const allocator = self.impl.allocator;
+        self.impl.lock.lockUncancelable(io);
+        defer self.impl.lock.unlock(io);
 
         if (self.impl.import_uris) |import_uris| return import_uris;
 
@@ -447,8 +450,8 @@ pub const Handle = struct {
     } {
         comptime std.debug.assert(supports_build_system);
 
-        self.impl.lock.lock();
-        defer self.impl.lock.unlock();
+        self.impl.lock.lockUncancelable(document_store.io);
+        defer self.impl.lock.unlock(document_store.io);
 
         const unresolved = switch (self.impl.associated_build_file) {
             .init => blk: {
@@ -538,8 +541,11 @@ pub const Handle = struct {
         const has_data_field_name = "has_" ++ name;
         const has_lock_field_name = "has_" ++ name ++ "_lock";
 
-        self.impl.lock.lock();
-        defer self.impl.lock.unlock();
+        const io = self.impl.store.io;
+
+        self.impl.lock.lockUncancelable(io);
+        defer self.impl.lock.unlock(io);
+
         while (true) {
             const status = self.getStatus();
             if (@field(status, has_data_field_name)) break;
@@ -547,12 +553,12 @@ pub const Handle = struct {
                 self.impl.status.bitSet(@bitOffsetOf(Status, has_lock_field_name), .release) != 0)
             {
                 // another thread is currently computing the data
-                self.impl.lazy_condition.wait(&self.impl.lock);
+                self.impl.lazy_condition.waitUncancelable(io, &self.impl.lock);
                 continue;
             }
-            defer self.impl.lazy_condition.broadcast();
+            defer self.impl.lazy_condition.broadcast(io);
 
-            @field(self.impl, name) = try Context.create(self, self.impl.allocator);
+            @field(self.impl, name) = try Context.create(self, self.impl.store.allocator);
             errdefer comptime unreachable;
 
             const old_has_data = self.impl.status.bitSet(@bitOffsetOf(Status, has_data_field_name), .release);
@@ -672,6 +678,10 @@ pub const ErrorMessage = struct {
 };
 
 pub fn deinit(self: *DocumentStore) void {
+    if (supports_build_system) {
+        self.wait_group.cancel(self.io);
+    }
+
     for (self.handles.keys(), self.handles.values()) |uri, handle| {
         handle.deinit();
         self.allocator.destroy(handle);
@@ -699,8 +709,8 @@ pub fn deinit(self: *DocumentStore) void {
 /// **Thread safe** takes a shared lock
 /// This function does not protect against data races from modifying the Handle
 pub fn getHandle(self: *DocumentStore, uri: Uri) ?*Handle {
-    self.lock.lockShared();
-    defer self.lock.unlockShared();
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
     return self.handles.get(uri);
 }
 
@@ -766,8 +776,8 @@ pub fn getOrLoadHandle(self: *DocumentStore, uri: Uri) ?*Handle {
 /// This function does not protect against data races from modifying the BuildFile
 pub fn getBuildFile(self: *DocumentStore, uri: Uri) ?*BuildFile {
     comptime std.debug.assert(supports_build_system);
-    self.lock.lockShared();
-    defer self.lock.unlockShared();
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
     return self.build_files.get(uri);
 }
 
@@ -780,8 +790,8 @@ fn getOrLoadBuildFile(self: *DocumentStore, uri: Uri) ?*BuildFile {
     if (self.getBuildFile(uri)) |build_file| return build_file;
 
     const new_build_file: *BuildFile = blk: {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const gop = self.build_files.getOrPut(self.allocator, uri) catch return null;
         if (gop.found_existing) return gop.value_ptr.*;
@@ -901,10 +911,7 @@ pub fn invalidateBuildFile(self: *DocumentStore, build_file_uri: Uri) void {
 
     const build_file = self.getBuildFile(build_file_uri) orelse return;
 
-    self.thread_pool.spawn(invalidateBuildFileWorker, .{ self, build_file }) catch {
-        self.invalidateBuildFileWorker(build_file);
-        return;
-    };
+    self.wait_group.async(self.io, invalidateBuildFileWorker, .{ self, build_file });
 }
 
 const progress_token = "buildProgressToken";
@@ -997,8 +1004,8 @@ fn notifyBuildEnd(self: *DocumentStore, status: EndStatus) void {
 
 fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) void {
     {
-        build_file.impl.mutex.lock();
-        defer build_file.impl.mutex.unlock();
+        build_file.impl.mutex.lockUncancelable(self.io);
+        defer build_file.impl.mutex.unlock(self.io);
 
         switch (build_file.impl.build_runner_state) {
             .idle => build_file.impl.build_runner_state = .running,
@@ -1021,20 +1028,20 @@ fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) void 
                 log.err("Failed to load build configuration for {s} (error: {})", .{ build_file.uri, err });
             }
             self.notifyBuildEnd(.failed);
-            build_file.impl.mutex.lock();
-            defer build_file.impl.mutex.unlock();
+            build_file.impl.mutex.lockUncancelable(self.io);
+            defer build_file.impl.mutex.unlock(self.io);
             build_file.impl.build_runner_state = .idle;
             return;
         };
 
-        build_file.impl.mutex.lock();
+        build_file.impl.mutex.lockUncancelable(self.io);
         switch (build_file.impl.build_runner_state) {
             .idle => unreachable,
             .running => {
                 var old_config = build_file.impl.config;
                 build_file.impl.config = build_config;
                 build_file.impl.build_runner_state = .idle;
-                build_file.impl.mutex.unlock();
+                build_file.impl.mutex.unlock(self.io);
 
                 if (old_config) |*config| config.deinit();
                 self.notifyBuildEnd(.success);
@@ -1042,7 +1049,7 @@ fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) void 
             },
             .running_but_already_invalidated => {
                 build_file.impl.build_runner_state = .running;
-                build_file.impl.mutex.unlock();
+                build_file.impl.mutex.unlock(self.io);
 
                 build_config.deinit();
                 continue;
@@ -1343,7 +1350,7 @@ fn uriAssociatedWithBuild(
         for (package_uris.items) |package_uri| self.allocator.free(package_uri);
         package_uris.deinit(self.allocator);
     }
-    const success = try build_file.collectBuildConfigPackageUris(self.allocator, &package_uris);
+    const success = try build_file.collectBuildConfigPackageUris(self.io, self.allocator, &package_uris);
     if (!success) return null;
 
     for (package_uris.items) |package_uri| {
@@ -1399,7 +1406,7 @@ fn createAndStoreDocument(
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
-    var new_handle = Handle.init(self.allocator, uri, text, lsp_synced) catch |err| {
+    var new_handle = Handle.init(self, uri, text, lsp_synced) catch |err| {
         self.allocator.free(text);
         return err;
     };
@@ -1409,8 +1416,8 @@ fn createAndStoreDocument(
         _ = self.getOrLoadBuildFile(uri);
     }
 
-    self.lock.lock();
-    defer self.lock.unlock();
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
 
     const gop = try self.handles.getOrPut(self.allocator, uri);
     errdefer if (!gop.found_existing) std.debug.assert(self.handles.swapRemove(uri));
@@ -1504,8 +1511,8 @@ pub fn collectDependencies(
     }
 
     if (supports_build_system) {
-        store.lock.lockShared();
-        defer store.lock.unlockShared();
+        store.mutex.lockUncancelable(store.io);
+        defer store.mutex.unlock(store.io);
         for (handle.cimports.items(.hash)) |hash| {
             const result = store.cimports.get(hash) orelse continue;
             switch (result) {
@@ -1518,7 +1525,7 @@ pub fn collectDependencies(
     if (supports_build_system) no_build_file: {
         const build_file_uri = try handle.getAssociatedBuildFileUri(store) orelse break :no_build_file;
         const build_file = store.getBuildFile(build_file_uri) orelse break :no_build_file;
-        _ = try build_file.collectBuildConfigPackageUris(allocator, dependencies);
+        _ = try build_file.collectBuildConfigPackageUris(store.io, allocator, dependencies);
     }
 }
 
@@ -1557,7 +1564,7 @@ pub fn collectIncludeDirs(
     const collected_all = switch (try handle.getAssociatedBuildFileUri2(store)) {
         .none => true,
         .unresolved => false,
-        .resolved => |build_file| try build_file.collectBuildConfigIncludePaths(allocator, include_dirs),
+        .resolved => |build_file| try build_file.collectBuildConfigIncludePaths(store.io, allocator, include_dirs),
     };
 
     return collected_all;
@@ -1578,8 +1585,8 @@ pub fn collectCMacros(
         .none => true,
         .unresolved => false,
         .resolved => |build_file| blk: {
-            const build_config = build_file.tryLockConfig() orelse break :blk false;
-            defer build_file.unlockConfig();
+            const build_config = build_file.tryLockConfig(store.io) orelse break :blk false;
+            defer build_file.unlockConfig(store.io);
 
             try c_macros.ensureUnusedCapacity(allocator, build_config.c_macros.len);
             for (build_config.c_macros) |c_macro| {
@@ -1614,8 +1621,8 @@ pub fn resolveCImport(self: *DocumentStore, handle: *Handle, node: Ast.Node.Inde
     const source = handle.cimports.items(.source)[index];
 
     {
-        self.lock.lockShared();
-        defer self.lock.unlockShared();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         if (self.cimports.get(hash)) |result| {
             switch (result) {
                 .success => |uri| return uri,
@@ -1672,8 +1679,8 @@ pub fn resolveCImport(self: *DocumentStore, handle: *Handle, node: Ast.Node.Inde
     }
 
     {
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         const gop = self.cimports.getOrPutValue(self.allocator, hash, result) catch |err| {
             result.deinit(self.allocator);
             return err;
@@ -1706,8 +1713,8 @@ fn publishCimportDiagnostics(self: *DocumentStore, handle: *Handle) !void {
 
     for (handle.cimports.items(.hash), handle.cimports.items(.node)) |hash, node| {
         const result = blk: {
-            self.lock.lock();
-            defer self.lock.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             break :blk self.cimports.get(hash) orelse continue;
         };
         const error_bundle: std.zig.ErrorBundle = switch (result) {
@@ -1789,8 +1796,8 @@ pub fn uriFromImportStr(self: *DocumentStore, allocator: std.mem.Allocator, hand
 
         if (isBuildFile(handle.uri)) blk: {
             const build_file = self.getBuildFile(handle.uri) orelse break :blk;
-            const build_config = build_file.tryLockConfig() orelse break :blk;
-            defer build_file.unlockConfig();
+            const build_config = build_file.tryLockConfig(self.io) orelse break :blk;
+            defer build_file.unlockConfig(self.io);
 
             for (build_config.deps_build_roots) |dep_build_root| {
                 if (std.mem.eql(u8, import_str, dep_build_root.name)) {
@@ -1799,8 +1806,8 @@ pub fn uriFromImportStr(self: *DocumentStore, allocator: std.mem.Allocator, hand
             }
         } else if (try handle.getAssociatedBuildFileUri(self)) |build_file_uri| blk: {
             const build_file = self.getBuildFile(build_file_uri).?;
-            const build_config = build_file.tryLockConfig() orelse break :blk;
-            defer build_file.unlockConfig();
+            const build_config = build_file.tryLockConfig(self.io) orelse break :blk;
+            defer build_file.unlockConfig(self.io);
 
             for (build_config.packages) |pkg| {
                 if (std.mem.eql(u8, import_str, pkg.name)) {
