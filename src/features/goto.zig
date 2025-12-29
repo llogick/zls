@@ -236,6 +236,8 @@ fn gotoDefinitionString(
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
+    const io = document_store.io;
+
     const loc = pos_context.stringLiteralContentLoc(handle.tree.source);
     if (loc.start == loc.end) return null;
     const import_str = offsets.locToSlice(handle.tree.source, loc);
@@ -257,7 +259,7 @@ fn gotoDefinitionString(
                 };
                 for (include_dirs.items) |dir| {
                     const path = try std.fs.path.join(arena, &.{ dir, import_str });
-                    std.fs.accessAbsolute(path, .{}) catch continue;
+                    std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
                     break :blk path;
                 }
                 return null;
