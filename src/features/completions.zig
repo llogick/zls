@@ -684,7 +684,7 @@ fn completeDot(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!void {
 ///  - `.cinclude_string_literal`
 ///  - `.embedfile_string_literal`
 ///  - `.string_literal`
-fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.PositionContext) error{OutOfMemory}!void {
+fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.PositionContext) !void {
     const io = builder.server.io;
 
     var completions: CompletionSet = .empty;

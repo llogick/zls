@@ -31,8 +31,8 @@
             .hash = "lsp_kit-0.1.0-bi_PL7stDADM03s6vUGZPk4GsWNC7BruKNsrn3ukhFI_",
         },
         .extended_zccs = .{
-            .url = "https://github.com/llogick/extended-zccs/archive/94c039a96a62ba5e600a51147535682b7bd83539.tar.gz",
-            .hash = "extended_zccs-0.16.0-dev-zEaUNnnRDgAtKFpTFxwy6yD2S-LbLPTiX9vK0rE2K9aX",
+            .url = "https://github.com/llogick/extended-zccs/archive/44c3884d9dd6356d164bb932f5c02496bc33ec9c.tar.gz",
+            .hash = "extended_zccs-0.16.0-dev-zEaUNra8DgBH6LuOZQ89LiB_9F3TZbhH4mWv7-lydrBP",
             // For local dev
             // .path = "../extended-zccs",
         },

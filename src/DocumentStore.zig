@@ -24,8 +24,8 @@ allocator: std.mem.Allocator,
 config: Config,
 mutex: std.Io.Mutex = .init,
 wait_group: if (supports_build_system) std.Io.Group else void = if (supports_build_system) .init else {},
-handles: Uri.ArrayHashMap(*Handle) = .empty,
-build_files: if (supports_build_system) Uri.ArrayHashMap(*BuildFile) else void = if (supports_build_system) .empty else {},
+handles: std.StringArrayHashMapUnmanaged(*Handle) = .empty,
+build_files: if (supports_build_system) std.StringArrayHashMapUnmanaged(*BuildFile) else void = if (supports_build_system) .empty else {},
 cimports: if (supports_build_system) std.AutoArrayHashMapUnmanaged(Hash, translate_c.Result) else void = if (supports_build_system) .empty else {},
 diagnostics_collection: *DiagnosticsCollection,
 builds_in_progress: std.atomic.Value(i32) = .init(0),
@@ -259,6 +259,8 @@ pub const Handle = struct {
     ) error{OutOfMemory}!Handle {
         const kind: extd_zccs.Ast.Kind = if (std.mem.eql(u8, std.fs.path.extension(uri), ".zon")) .zon else .zig;
 
+        const allocator = store.allocator;
+
         var custom_ast = try createAst(allocator, text, kind, lsp_synced);
         errdefer custom_ast.destroy();
 
@@ -307,7 +309,7 @@ pub const Handle = struct {
         const tracy_zone = tracy.trace(@src());
         defer tracy_zone.end();
 
-        const allocator = self.impl.allocator;
+        const allocator = self.ast.gpa;
 
         self.deinitAstDeps();
         self.ast.destroy();
@@ -667,7 +669,7 @@ pub const Handle = struct {
 
         self.impl.status = .init(@bitCast(Status{ .lsp_synced = self.isLspSynced() }));
         self.tree = self.ast.toStdAst();
-        self.cimports = try collectCIncludes(self.impl.allocator, &self.tree);
+        self.cimports = try collectCIncludes(self.ast.gpa, &self.tree);
     }
 };
 

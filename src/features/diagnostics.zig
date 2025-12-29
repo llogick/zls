@@ -546,6 +546,7 @@ pub const BuildOnSave = struct {
             child_process,
             options.collection,
             duped_workspace_path,
+            options.document_store,
         });
         errdefer comptime unreachable;
 

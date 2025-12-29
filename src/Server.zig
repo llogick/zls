@@ -1157,8 +1157,8 @@ fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: ty
 fn saveDocumentHandler(server: *Server, arena: std.mem.Allocator, notification: types.TextDocument.DidSaveParams) Error!void {
     const uri = notification.textDocument.uri;
 
-    if (DocumentStore.supports_build_system and DocumentStore.isBuildFile(document_uri)) {
-        server.document_store.invalidateBuildFile(document_uri);
+    if (DocumentStore.supports_build_system and DocumentStore.isBuildFile(uri)) {
+        server.document_store.invalidateBuildFile(uri);
     }
 
     if (server.autofixWorkaround() == .on_save) {
