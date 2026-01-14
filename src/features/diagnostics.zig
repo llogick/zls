@@ -704,100 +704,107 @@ pub const BuildOnSave = struct {
 
         try diagnostic_tags.put(allocator, diagnostic_tag, {});
 
-        const eb: std.zig.ErrorBundle = .{ .string_bytes = string_bytes, .extra = extra };
+        const eb: ErrorBundle = .{ .string_bytes = string_bytes, .extra = extra };
 
-        if (eb.errorMessageCount() != 0) {
-            for (eb.getMessages()) |err_msg_index| {
-                const err_msg = eb.getErrorMessage(err_msg_index);
-                if (err_msg.src_loc == .none) continue;
+        // Iterate over Messages, checking if the target uri matches a currently LspSynced document
+        // If NOT: iterate over the reference-trace for that Message, looking for the first LspSynced document
+        // and surface the original error in that document/location
+        if (eb.errorMessageCount() != 0) for (eb.getMessages()) |message_index| {
+            const message = eb.getErrorMessage(message_index);
+            if (message.src_loc == .none) continue;
 
-                const err_src_loc = eb.getSourceLocation(err_msg.src_loc);
-                const src_path = eb.nullTerminatedString(err_src_loc.src_path);
+            // call local extraData instead of getSourceLocation to get the .end index as well
+            const location = errbExtraData(
+                eb,
+                ErrorBundle.SourceLocation,
+                @intFromEnum(message.src_loc),
+            );
+            if (location.data.reference_trace_len == 0) continue;
 
-                const uri = try DiagnosticsCollection.pathToUri(
+            const path = eb.nullTerminatedString(location.data.src_path);
+            const uri = try DiagnosticsCollection.pathToUri(
+                arena,
+                workspace_path,
+                path,
+            ) orelse continue;
+
+            const target_uri_is_open_in_editor = if (ds.getHandle(uri)) |doc| doc.isLspSynced() else false;
+            if (target_uri_is_open_in_editor) continue;
+
+            var wip_eb: ErrorBundle.Wip = undefined;
+            try wip_eb.init(arena);
+
+            var notes: std.ArrayList(ErrorBundle.MessageIndex) = .empty;
+            try notes.append(arena, try wip_eb.addErrorMessage(.{
+                .msg = try wip_eb.addString(eb.nullTerminatedString(location.data.source_line)),
+                .src_loc = try addOtherSourceLocation(&wip_eb, eb, message.src_loc),
+            }));
+
+            var reference_index = location.end;
+            for (0..location.data.reference_trace_len) |_| {
+                const reference = errbExtraData(
+                    eb,
+                    ErrorBundle.ReferenceTrace,
+                    reference_index,
+                );
+                reference_index = reference.end;
+                if (reference.data.src_loc == .none) break;
+
+                const ref_location = eb.getSourceLocation(reference.data.src_loc);
+                const ref_path = eb.nullTerminatedString(ref_location.src_path);
+                const ref_uri = try DiagnosticsCollection.pathToUri(
                     arena,
                     workspace_path,
-                    src_path,
+                    ref_path,
                 ) orelse continue;
 
-                const doc_is_open_in_editor = if (ds.getHandle(uri)) |doc| doc.isLspSynced() else false;
-                if (doc_is_open_in_editor) continue;
-                if (err_src_loc.reference_trace_len == 0) continue;
+                try notes.append(arena, try wip_eb.addErrorMessage(.{
+                    .msg = try wip_eb.addString(eb.nullTerminatedString(reference.data.decl_name)),
+                    .src_loc = try addOtherSourceLocation(&wip_eb, eb, reference.data.src_loc),
+                }));
 
-                // @compileError does not provide notes, eg
-                // `@compileError("invalid format string '" ++ fmt ++ "' for type '" ++ @typeName(@TypeOf(value)) ++ "'")`
-                // in std/fmt.zig .
-                // Attach a few reference-trace entries to help out.
+                const ref_uri_is_open_in_editor = if (ds.getHandle(ref_uri)) |doc| doc.isLspSynced() else false;
+                if (!ref_uri_is_open_in_editor) continue;
 
-                const src = extraData(
-                    eb,
-                    std.zig.ErrorBundle.SourceLocation,
-                    @intFromEnum(err_msg.src_loc),
+                try wip_eb.addRootErrorMessage(.{
+                    .msg = try wip_eb.addString(
+                        try std.fmt.allocPrint(
+                            arena,
+                            "[!] {s}",
+                            .{
+                                eb.nullTerminatedString(message.msg),
+                            },
+                        ),
+                    ),
+                    .src_loc = try wip_eb.addSourceLocation(
+                        .{
+                            .src_path = try wip_eb.addString(ref_path),
+                            .line = ref_location.line,
+                            .column = ref_location.column,
+                            // The following four values are tailored as such that DiagnosticsCollection.errorBundleSourceLocationToRange
+                            // will emit a lsp.types.Range that underlines line:0 to line:column . See the ^ fn for more info
+                            .span_start = 0,
+                            .span_main = ref_location.column,
+                            .span_end = ref_location.column,
+                            .source_line = 0,
+                        },
+                    ),
+                    .notes_len = @intCast(notes.items.len),
+                });
+
+                const notes_start = try wip_eb.reserveNotes(@intCast(notes.items.len));
+                @memcpy(wip_eb.extra.items[notes_start..][0..notes.items.len], @as([]const u32, @ptrCast(notes.items)));
+
+                try collection.pushErrorBundle(
+                    diagnostic_tag,
+                    header.cycle,
+                    workspace_path,
+                    try wip_eb.toOwnedBundle(""),
                 );
 
-                var ref_index = src.end;
-                for (0..src.data.reference_trace_len) |i| {
-                    const ref_trace = extraData(
-                        eb,
-                        std.zig.ErrorBundle.ReferenceTrace,
-                        ref_index,
-                    );
-
-                    ref_index = ref_trace.end;
-
-                    if (ref_trace.data.src_loc != .none) {
-                        const ref_src_loc = eb.getSourceLocation(ref_trace.data.src_loc);
-                        const ref_src_path = eb.nullTerminatedString(ref_src_loc.src_path);
-
-                        const ref_uri = try DiagnosticsCollection.pathToUri(
-                            arena,
-                            workspace_path,
-                            ref_src_path,
-                        ) orelse continue;
-
-                        if ((if (ds.getHandle(ref_uri)) |doc| doc.isLspSynced() else false)) {
-                            var wip_eb: std.zig.ErrorBundle.Wip = undefined;
-
-                            try wip_eb.init(arena);
-
-                            const msg = try std.fmt.allocPrint(
-                                arena,
-                                "(RTE#{}) {s}",
-                                .{
-                                    i + 1,
-                                    eb.nullTerminatedString(err_msg.msg),
-                                },
-                            );
-
-                            try wip_eb.addRootErrorMessage(.{
-                                .msg = try wip_eb.addString(msg),
-                                .src_loc = try wip_eb.addSourceLocation(
-                                    .{
-                                        .src_path = try wip_eb.addString(ref_src_path),
-                                        .line = ref_src_loc.line,
-                                        .column = ref_src_loc.column,
-                                        .span_start = ref_src_loc.span_start,
-                                        .span_main = ref_src_loc.span_main,
-                                        .span_end = ref_src_loc.span_end,
-                                        .source_line = try wip_eb.addString(eb.nullTerminatedString(ref_src_loc.source_line)),
-                                    },
-                                ),
-                                .notes_len = 0,
-                            });
-
-                            try collection.pushErrorBundle(
-                                diagnostic_tag,
-                                header.cycle,
-                                workspace_path,
-                                try wip_eb.toOwnedBundle(""),
-                            );
-
-                            break;
-                        }
-                    }
-                }
+                break;
             }
-        }
+        };
 
         try collection.pushErrorBundle(diagnostic_tag, header.cycle, workspace_path, eb);
         try collection.publishDiagnostics();
@@ -862,11 +869,15 @@ fn readToEndAlloc(
     };
 }
 
+// --- The following functions borrowed from std.zig.ErrorBundle
+
+const ErrorBundle = std.zig.ErrorBundle;
+
 /// Returns the requested data, as well as the new index which is at the start of the
 /// trailers for the object.
-fn extraData(eb: std.zig.ErrorBundle, comptime T: type, index: usize) struct { data: T, end: usize } {
-    const MessageIndex = std.zig.ErrorBundle.MessageIndex;
-    const SourceLocationIndex = std.zig.ErrorBundle.SourceLocationIndex;
+fn errbExtraData(eb: ErrorBundle, comptime T: type, index: usize) struct { data: T, end: usize } {
+    const MessageIndex = ErrorBundle.MessageIndex;
+    const SourceLocationIndex = ErrorBundle.SourceLocationIndex;
     const fields = @typeInfo(T).@"struct".fields;
     var i: usize = index;
     var result: T = undefined;
@@ -883,4 +894,55 @@ fn extraData(eb: std.zig.ErrorBundle, comptime T: type, index: usize) struct { d
         .data = result,
         .end = i,
     };
+}
+
+fn addOtherSourceLocation(
+    wip: *ErrorBundle.Wip,
+    other: ErrorBundle,
+    index: ErrorBundle.SourceLocationIndex,
+) !ErrorBundle.SourceLocationIndex {
+    if (index == .none) return .none;
+    const other_sl = other.getSourceLocation(index);
+
+    var ref_traces: std.ArrayList(ErrorBundle.ReferenceTrace) = .empty;
+    defer ref_traces.deinit(wip.gpa);
+
+    if (other_sl.reference_trace_len > 0) {
+        var ref_index = errbExtraData(other, ErrorBundle.SourceLocation, @intFromEnum(index)).end;
+        for (0..other_sl.reference_trace_len) |_| {
+            const other_ref_trace_ed = errbExtraData(other, ErrorBundle.ReferenceTrace, ref_index);
+            const other_ref_trace = other_ref_trace_ed.data;
+            ref_index = other_ref_trace_ed.end;
+
+            const ref_trace: ErrorBundle.ReferenceTrace = if (other_ref_trace.src_loc == .none) .{
+                // sentinel ReferenceTrace does not store a string index in decl_name
+                .decl_name = other_ref_trace.decl_name,
+                .src_loc = .none,
+            } else .{
+                .decl_name = try wip.addString(other.nullTerminatedString(other_ref_trace.decl_name)),
+                .src_loc = try addOtherSourceLocation(wip, other, other_ref_trace.src_loc),
+            };
+            try ref_traces.append(wip.gpa, ref_trace);
+        }
+    }
+
+    const src_loc = try wip.addSourceLocation(.{
+        .src_path = try wip.addString(other.nullTerminatedString(other_sl.src_path)),
+        .line = other_sl.line,
+        .column = other_sl.column,
+        .span_start = other_sl.span_start,
+        .span_main = other_sl.span_main,
+        .span_end = other_sl.span_end,
+        .source_line = if (other_sl.source_line != 0)
+            try wip.addString(other.nullTerminatedString(other_sl.source_line))
+        else
+            0,
+        .reference_trace_len = other_sl.reference_trace_len,
+    });
+
+    for (ref_traces.items) |ref_trace| {
+        try wip.addReferenceTrace(ref_trace);
+    }
+
+    return src_loc;
 }
