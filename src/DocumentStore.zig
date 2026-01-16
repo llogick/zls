@@ -703,17 +703,41 @@ pub const Handle = struct {
                 if (last_full_text_index) |_| {
                     // clear the error by setting it's src_loc to .none/0
                     @constCast(entry.error_bundle.extra)[@intFromEnum(message.src_loc)] = 0;
+                    continue;
+                }
+                for (changes) |change| {
+                    const ptdc = change.text_document_content_change_partial;
+                    if (ptdc.range.start.line > loc.line) continue;
+                    if (ptdc.range.end.line < loc.line) {
+                        const num_affected_lines: u32 = @intCast(ptdc.range.end.line - ptdc.range.start.line);
+                        const num_new_lines: u32 = @intCast(std.mem.count(u8, ptdc.text, "\n"));
+                        if (num_new_lines == num_affected_lines) continue;
+                        var new_loc = loc;
+                        if (num_new_lines == 0) new_loc.line -= num_affected_lines else new_loc.line += if (num_new_lines > num_affected_lines)
+                            (num_new_lines - num_affected_lines)
+                        else
+                            (num_affected_lines - num_new_lines);
+                        setExtra(&entry.error_bundle, @intFromEnum(message.src_loc), new_loc);
+                    }
                 }
             }
         }
     }
 };
 
-pub const ErrorMessage = struct {
-    loc: offsets.Loc,
-    code: []const u8,
-    message: []const u8,
-};
+fn setExtra(wip: *const std.zig.ErrorBundle, index: usize, extra: anytype) void {
+    const fields = @typeInfo(@TypeOf(extra)).@"struct".fields;
+    var i = index;
+    inline for (fields) |field| {
+        @constCast(wip.extra)[i] = switch (field.type) {
+            u32 => @field(extra, field.name),
+            std.zig.ErrorBundle.MessageIndex => @intFromEnum(@field(extra, field.name)),
+            std.zig.ErrorBundle.SourceLocationIndex => @intFromEnum(@field(extra, field.name)),
+            else => @compileError("bad field type"),
+        };
+        i += 1;
+    }
+}
 
 pub fn deinit(self: *DocumentStore) void {
     if (supports_build_system) {
