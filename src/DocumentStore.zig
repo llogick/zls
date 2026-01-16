@@ -614,6 +614,7 @@ pub const Handle = struct {
         self: *Handle,
         content_changes: []const lsp.types.TextDocument.ContentChangeEvent,
         encoding: offsets.Encoding,
+        diagnostics_collection: *DiagnosticsCollection,
     ) error{ OutOfMemory, InternalError }!void {
         const tracy_zone = tracy.trace(@src());
         defer tracy_zone.end();
@@ -625,10 +626,18 @@ pub const Handle = struct {
         var idx_hi: u32, //
         const last_full_text_index //
         = blk: {
-            var i: u32 = @intCast(content_changes.len -| 1);
-            while (i != 0) : (i -= 1) {
+            var i: u32 = @intCast(content_changes.len);
+            while (i != 0) {
+                i -= 1;
                 switch (content_changes[i]) {
-                    .text_document_content_change_partial => continue,
+                    .text_document_content_change_partial => |pcc| {
+                        if (pcc.rangeLength) |rl| if (rl != self.ast.bytes.items.len - 1) continue;
+                        // sometimes partial masks a whole
+                        const loc = offsets.rangeToLoc(self.ast.bytes.items, pcc.range, encoding);
+                        if (loc.start != 0 and loc.end != self.ast.bytes.items.len - 1) continue;
+                        try self.ast.bytes.replaceRange(self.ast.gpa, 0, self.ast.bytes.items.len - 1, pcc.text);
+                        break :blk .{ 0, @intCast(self.ast.bytes.items.len - 1), i };
+                    },
                     .text_document_content_change_whole_document => |content_change| {
                         try self.ast.bytes.replaceRange(self.ast.gpa, 0, self.ast.bytes.items.len - 1, content_change.text);
                         break :blk .{ 0, @intCast(self.ast.bytes.items.len - 1), i };
@@ -671,6 +680,32 @@ pub const Handle = struct {
         self.impl.status = .init(@bitCast(Status{ .lsp_synced = self.isLspSynced() }));
         self.tree = self.ast.toStdAst();
         self.cimports = try collectCIncludes(self.ast.gpa, &self.tree);
+
+        var arena_state = std.heap.ArenaAllocator.init(self.ast.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        for (diagnostics_collection.tag_set.values()) |entry| {
+            if (entry.error_bundle.errorMessageCount() == 0) continue;
+            const eb = entry.error_bundle;
+            for (eb.getMessages()) |message_index| {
+                const message = eb.getErrorMessage(message_index);
+                if (message.src_loc == .none) continue;
+
+                const loc = eb.getSourceLocation(message.src_loc);
+                const path = eb.nullTerminatedString(loc.src_path);
+                const uri = try DiagnosticsCollection.pathToUri(
+                    arena,
+                    entry.error_bundle_src_base_path,
+                    path,
+                ) orelse continue;
+                if (!std.mem.eql(u8, self.uri, uri)) continue;
+                if (last_full_text_index) |_| {
+                    // clear the error by setting it's src_loc to .none/0
+                    @constCast(entry.error_bundle.extra)[@intFromEnum(message.src_loc)] = 0;
+                }
+            }
+        }
     }
 };
 

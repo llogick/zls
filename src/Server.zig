@@ -1151,6 +1151,7 @@ fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: ty
     try handle.applyContentChanges(
         notification.contentChanges,
         server.offset_encoding,
+        &server.diagnostics_collection,
     );
     handle.setChangePending(false);
 
