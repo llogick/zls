@@ -4864,7 +4864,7 @@ pub const PositionContext = union(enum) {
     /// XXX: Internal use only, currently points to the loc of the first l_paren
     parens_expr: offsets.Loc,
     keyword: Ast.TokenIndex,
-    error_access,
+    error_access: Ast.TokenIndex,
     comment,
     other,
     empty,
@@ -4885,8 +4885,9 @@ pub const PositionContext = union(enum) {
             .char_literal,
             .parens_expr,
             => |l| return l,
-            .keyword => |token_index| return offsets.tokenToLoc(tree, token_index),
             .error_access,
+            .keyword,
+            => |token_index| return offsets.tokenToLoc(tree, token_index),
             .comment,
             .other,
             .empty,
@@ -5186,7 +5187,7 @@ pub fn getPositionContext(
             .r_bracket => try stack.pop(allocator, curr_ctx.scope == .brackets),
             .l_brace => try stack.push(allocator, &.{ .ctx = if (curr_ctx.ctx == .error_access) curr_ctx.ctx else .empty, .scope = .braces }),
             .r_brace => try stack.pop(allocator, curr_ctx.scope == .braces),
-            .keyword_error => curr_ctx.ctx = .error_access,
+            .keyword_error => curr_ctx.ctx = .{ .error_access = current_token },
             .number_literal => {
                 if (tok.loc.start <= source_index and tok.loc.end >= source_index) {
                     return .{ .number_literal = tok.loc };

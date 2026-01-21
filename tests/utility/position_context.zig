@@ -402,34 +402,34 @@ test "multi-line string literal" {
 
 test "error access" {
     try testContext(
-        \\fn foo() <cursor>error!void {
+        \\fn foo() <cursor><loc>error</loc>!void {
     , .error_access, .{ .lookahead = true });
     try testContext(
-        \\fn foo() erro<cursor>r!void {
+        \\fn foo() <loc>erro<cursor>r</loc>!void {
     , .error_access, .{ .lookahead = true });
     try testContext(
-        \\fn foo() error<cursor>!void {
+        \\fn foo() <loc>error<cursor></loc>!void {
     , .error_access, .{});
     try testContext(
-        \\fn foo() error<cursor>.!void {
+        \\fn foo() <loc>error</loc><cursor>.!void {
     , .error_access, .{});
     try testContext(
-        \\fn foo() error.<cursor>!void {
+        \\fn foo() <loc>error</loc>.<cursor>!void {
     , .error_access, .{});
     try testContext(
-        \\fn foo() error{<cursor>}!void {
+        \\fn foo() <loc>error</loc>{<cursor>}!void {
     , .error_access, .{});
     try testContext(
-        \\fn foo() error{OutOfMemory, <cursor>}!void {
+        \\fn foo() <loc>error</loc>{OutOfMemory, <cursor>}!void {
     , .error_access, .{});
     try testContext(
-        \\fn foo() error{
+        \\fn foo() <loc>error</loc>{
         \\  OutOfMemory,
         \\  <cursor>
         \\}!void {
     , .error_access, .{});
     try testContext(
-        \\fn foo() error{
+        \\fn foo() <loc>error</loc>{
         \\  /// Doc Comment
         \\  OutOfMemory,
         \\  <cursor>

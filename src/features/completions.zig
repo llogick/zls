@@ -715,6 +715,47 @@ fn completeDot(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!void {
     try globalSetCompletions(builder, .enum_set);
 }
 
+/// Handles `error.` completions
+/// If unable to -> returns null => let globalSetCompletions handle it
+fn completeError(builder: *Builder, token_index: std.zig.Ast.TokenIndex) error{OutOfMemory}!?void {
+    const tracy_zone = tracy.trace(@src());
+    defer tracy_zone.end();
+
+    const tree = builder.orig_handle.tree;
+    const token_tags = tree.tokens.items(.tag);
+    const token_starts = tree.tokens.items(.start);
+
+    std.debug.assert(token_tags[token_index] == .keyword_error);
+    if (token_index < 1 or token_index > token_tags.len - 2) return null;
+
+    const dot_token_index = token_index + 1;
+    if (token_tags[dot_token_index] != .period) return null;
+
+    if (token_tags[token_index - 1] == .keyword_return) {
+        const doc_scope = try builder.orig_handle.getDocumentScope();
+        const fn_scope = Analyser.innermostScopeAtIndexWithTag(doc_scope, token_starts[token_index], .initOne(.function)).unwrap() orelse return null;
+        const fn_node = doc_scope.getScopeAstNode(fn_scope).?;
+        const fn_type = try builder.analyser.resolveTypeOfNode(.of(fn_node, builder.orig_handle)) orelse return null;
+        const ret_type = try builder.analyser.resolveReturnType(fn_type) orelse return null;
+        const err_type = try builder.analyser.resolveUnwrapErrorUnionType(ret_type, .error_set) orelse return null;
+        return collectErrorSetTypeFields(builder, err_type);
+    }
+
+    const nodes = try ast.nodesOverlappingIndexIncludingParseErrors(builder.arena, &tree, token_starts[token_index]);
+    var dot_context = getSwitchOrStructInitContext(&tree, dot_token_index, nodes) orelse return null;
+    if (dot_context.likely != .switch_case) return null;
+
+    const name_loc = offsets.tokenToLoc(&tree, dot_context.type_info.identifier_token_index);
+    var types_list: Analyser.Type.ArraySet = .empty;
+    try collectVarAccessContainerNodes(builder, builder.orig_handle, name_loc, dot_context, &types_list);
+
+    if (types_list.entries.len == 0) return null;
+
+    for (types_list.keys()) |ty| {
+        _ = try collectErrorSetTypeFields(builder, ty);
+    }
+}
+
 /// Asserts that `pos_context` is one of the following:
 ///  - `.import_string_literal`
 ///  - `.cinclude_string_literal`
@@ -910,7 +951,7 @@ pub fn completionAtIndex(
         .builtin => try completeBuiltin(&builder),
         .var_access, .empty => try completeGlobal(&builder),
         .field_access => |loc| try completeFieldAccess(&builder, loc),
-        .error_access => try globalSetCompletions(&builder, .error_set),
+        .error_access => |token_index| try completeError(&builder, token_index) orelse try globalSetCompletions(&builder, .error_set),
         .enum_literal => |loc| try completeDot(&builder, loc),
         .label_access, .label_decl => try completeLabel(&builder),
         .import_string_literal,
@@ -1607,6 +1648,29 @@ fn collectContainerNodes(
         else => {},
     }
     return types_with_handles.keys();
+}
+
+fn collectErrorSetTypeFields(
+    builder: *Builder,
+    err_type: Analyser.Type,
+) error{OutOfMemory}!?void {
+    if (err_type.data != .ip_index) return null;
+    const ip = builder.analyser.ip;
+    const key = ip.indexToKey(err_type.data.ip_index.type);
+    if (key != .error_set_type) return null;
+    if (key.error_set_type.names.len == 0) return;
+
+    ip.string_pool.mutex.lock();
+    defer ip.string_pool.mutex.unlock();
+
+    for (0..key.error_set_type.names.len) |name_idx| {
+        const err_name = ip.string_pool.stringToSliceUnsafe(key.error_set_type.names.at(@intCast(name_idx), ip));
+        try builder.completions.append(builder.arena, .{
+            .label = err_name,
+            .kind = .EnumMember,
+            .insertText = err_name,
+        });
+    }
 }
 
 fn resolveBuiltinFnArg(
